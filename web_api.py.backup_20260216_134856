@@ -1,0 +1,743 @@
+#!/usr/bin/env python3
+"""
+AlBi Music Web API
+FastAPI backend для веб-версии с OAuth авторизацией (VK + Yandex)
+Порт: 8001
+"""
+
+import os
+import logging
+import secrets
+import hashlib
+import json
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any
+from urllib.parse import urlencode
+
+import httpx
+import jwt
+from fastapi import FastAPI, Request, HTTPException, Depends, status
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
+
+import config
+from db_utils import execute_query_sync, init_db_pool_sync
+from celery_tasks import (
+    generate_music_task,
+    generate_song_task,
+    generate_suno_lyrics_sync,
+    generate_karaoke_task,
+    generate_cover_task
+)
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Инициализация FastAPI
+app = FastAPI(
+    title="AlBi Music Web API",
+    description="Web API для генерации музыки через Suno AI",
+    version="1.0.0"
+)
+
+# CORS - разрешаем запросы с фронтенда
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://albi-music.ru",
+        "http://localhost:3000",  # Для разработки
+        "http://127.0.0.1:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Инициализация БД
+init_db_pool_sync()
+logger.info("✅ Database pool initialized")
+
+# JWT конфигурация
+JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24 * 30  # 30 дней
+
+# OAuth конфигурация
+OAUTH_CONFIG = {
+    "vk": {
+        "app_id": "54451761",
+        "client_secret": "EXsS6C2HrdCS8I5Pddjn",
+        "auth_url": "https://oauth.vk.com/authorize",
+        "token_url": "https://oauth.vk.com/access_token",
+        "user_info_url": "https://api.vk.com/method/users.get",
+        "redirect_uri": "https://albi-music.ru/auth/vk/callback"
+    },
+    "yandex": {
+        "client_id": "b70f75fc77be48b7a9edb745fcd78670",
+        "client_secret": "a750e263bf6e4bb68d53437624164197",
+        "auth_url": "https://oauth.yandex.ru/authorize",
+        "token_url": "https://oauth.yandex.ru/token",
+        "user_info_url": "https://login.yandex.ru/info",
+        "redirect_uri": "https://albi-music.ru/auth/yandex/callback"
+    }
+}
+
+# Хранилище state для OAuth (в продакшене использовать Redis)
+oauth_states: Dict[str, Dict[str, Any]] = {}
+
+# Security
+security = HTTPBearer()
+
+
+# ========================
+# Модели данных (Pydantic)
+# ========================
+
+class UserInfo(BaseModel):
+    user_id: int
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    balance: int = 1
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_info: UserInfo
+
+
+class GenerateMusicRequest(BaseModel):
+    style: str
+    is_song: bool = False
+
+
+class GenerateSongRequest(BaseModel):
+    lyrics: str
+    genre: str
+    custom_mode: bool = False
+
+
+class GenerateLyricsRequest(BaseModel):
+    idea: str
+
+
+class UnlockTrackRequest(BaseModel):
+    task_id: str
+
+class VKIDAuthRequest(BaseModel):
+    token: str
+    uuid: str
+
+
+
+# ========================
+# Утилиты
+# ========================
+
+def create_jwt_token(user_id: int, provider: str) -> str:
+    """Создает JWT токен для пользователя"""
+    payload = {
+        "user_id": user_id,
+        "provider": provider,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+        "iat": datetime.utcnow()
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return token
+
+
+def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
+    """Проверяет и декодирует JWT токен"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        logger.warning("JWT token expired")
+        return None
+    except jwt.InvalidTokenError:
+        logger.warning("Invalid JWT token")
+        return None
+
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
+    """Извлекает user_id из JWT токена"""
+    token = credentials.credentials
+    payload = verify_jwt_token(token)
+
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token"
+        )
+
+    return payload["user_id"]
+
+
+def get_or_create_user(user_id: int, provider: str, username: str = None, first_name: str = None) -> UserInfo:
+    """Получает или создает пользователя в БД"""
+    try:
+        # Проверяем существует ли пользователь
+        result = execute_query_sync(
+            "SELECT user_id, username, first_name, balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+
+        if result:
+            row = result[0]
+            return UserInfo(
+                user_id=row[0],
+                username=row[1],
+                first_name=row[2],
+                balance=row[3]
+            )
+
+        # Создаем нового пользователя
+        execute_query_sync(
+            """
+            INSERT INTO users (user_id, username, first_name, balance, created_at, invited_by)
+            VALUES (%s, %s, %s, 1, NOW(), NULL)
+            """,
+            (user_id, username, first_name)
+        )
+
+        logger.info(f"✅ Created new user: {user_id} via {provider}")
+
+        return UserInfo(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            balance=1
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Error getting/creating user: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+# ========================
+# OAuth endpoints
+# ========================
+
+@app.get("/auth/{provider}/login")
+async def oauth_login(provider: str):
+    """
+    Начало OAuth авторизации (VK или Yandex)
+    Возвращает URL для перенаправления пользователя
+    """
+    if provider not in OAUTH_CONFIG:
+        raise HTTPException(status_code=400, detail="Unsupported OAuth provider")
+
+    config = OAUTH_CONFIG[provider]
+
+    # Генерируем state для защиты от CSRF
+    state = secrets.token_urlsafe(32)
+    oauth_states[state] = {
+        "provider": provider,
+        "created_at": datetime.utcnow()
+    }
+
+    # Формируем URL авторизации
+    if provider == "vk":
+        params = {
+            "client_id": config["app_id"],
+            "redirect_uri": config["redirect_uri"],
+            "response_type": "code",
+            "display": "page",
+            "state": state,
+            "v": "5.131"
+        }
+    else:  # yandex
+        params = {
+            "client_id": config["client_id"],
+            "redirect_uri": config["redirect_uri"],
+            "response_type": "code",
+            "state": state
+        }
+
+    auth_url = f"{config['auth_url']}?{urlencode(params)}"
+
+    logger.info(f"🔐 OAuth login started: {provider}, state={state}")
+
+    return JSONResponse({
+        "auth_url": auth_url,
+        "state": state
+    })
+
+
+@app.get("/auth/{provider}/callback")
+async def oauth_callback(provider: str, code: str, state: str):
+    """
+    Callback для OAuth авторизации
+    Обменивает code на access_token и создает JWT токен
+    """
+    if provider not in OAUTH_CONFIG:
+        raise HTTPException(status_code=400, detail="Unsupported OAuth provider")
+
+    # Проверяем state
+    if state not in oauth_states:
+        raise HTTPException(status_code=400, detail="Invalid state")
+
+    # Удаляем использованный state
+    oauth_states.pop(state)
+
+    config = OAUTH_CONFIG[provider]
+
+    try:
+        # Обмениваем code на access_token
+        async with httpx.AsyncClient() as client:
+            if provider == "vk":
+                token_params = {
+                    "client_id": config["app_id"],
+                    "client_secret": config["client_secret"],
+                    "redirect_uri": config["redirect_uri"],
+                    "code": code
+                }
+                token_response = await client.post(config["token_url"], data=token_params)
+                token_data = token_response.json()
+
+                if "error" in token_data:
+                    raise HTTPException(status_code=400, detail=token_data.get("error_description", "OAuth error"))
+
+                access_token = token_data["access_token"]
+                vk_user_id = token_data["user_id"]
+
+                # Получаем информацию о пользователе
+                user_info_params = {
+                    "access_token": access_token,
+                    "user_ids": vk_user_id,
+                    "fields": "photo_200",
+                    "v": "5.131"
+                }
+                user_response = await client.get(config["user_info_url"], params=user_info_params)
+                user_data = user_response.json()
+
+                if "error" in user_data:
+                    raise HTTPException(status_code=400, detail="Failed to get user info")
+
+                user = user_data["response"][0]
+                user_id = user["id"]
+                first_name = user.get("first_name", "")
+                last_name = user.get("last_name", "")
+                username = f"{first_name} {last_name}"
+                avatar_url = user.get("photo_200")
+
+            else:  # yandex
+                token_params = {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": config["client_id"],
+                    "client_secret": config["client_secret"]
+                }
+                token_response = await client.post(config["token_url"], data=token_params)
+                token_data = token_response.json()
+
+                if "error" in token_data:
+                    raise HTTPException(status_code=400, detail=token_data.get("error_description", "OAuth error"))
+
+                access_token = token_data["access_token"]
+
+                # Получаем информацию о пользователе
+                headers = {"Authorization": f"OAuth {access_token}"}
+                user_response = await client.get(config["user_info_url"], headers=headers)
+                user_data = user_response.json()
+
+                # Yandex ID возвращает строковый ID, преобразуем в числовой hash
+                yandex_id = user_data["id"]
+                user_id = int(hashlib.sha256(f"yandex_{yandex_id}".encode()).hexdigest()[:15], 16) % (10**9)
+
+                first_name = user_data.get("first_name", "")
+                last_name = user_data.get("last_name", "")
+                username = f"{first_name} {last_name}" if first_name or last_name else user_data.get("display_name", "User")
+                avatar_url = user_data.get("default_avatar_id")
+                if avatar_url:
+                    avatar_url = f"https://avatars.yandex.net/get-yapic/{avatar_url}/islands-200"
+
+        # Создаем или получаем пользователя в БД
+        user_info = get_or_create_user(user_id, provider, username, first_name)
+
+        # Создаем JWT токен
+        jwt_token = create_jwt_token(user_id, provider)
+
+        logger.info(f"✅ OAuth successful: {provider}, user_id={user_id}")
+
+        # Редирект на фронтенд с токеном
+        frontend_url = f"https://albi-music.ru/app?token={jwt_token}"
+        return RedirectResponse(url=frontend_url)
+
+    except httpx.HTTPError as e:
+        logger.error(f"❌ OAuth HTTP error: {e}")
+        raise HTTPException(status_code=500, detail="OAuth provider error")
+    except Exception as e:
+        logger.error(f"❌ OAuth error: {e}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
+
+
+
+
+# ========================
+# VK ID Auth (NEW)
+# ========================
+
+@app.post("/api/auth/vk/token")
+async def vk_id_auth(request: VKIDAuthRequest):
+    """
+    Новая авторизация через VK ID
+    Принимает токен от VK ID SDK и создаёт JWT токен
+    """
+    try:
+        logger.info(f"🔐 VK ID auth attempt with token: {request.token[:20]}...")
+
+        # Валидируем VK ID токен
+        async with httpx.AsyncClient() as client:
+            # VK ID Silent Token endpoint
+            response = await client.post(
+                "https://id.vk.com/oauth2/user_info",
+                headers={
+                    "Authorization": f"Bearer {request.token}"
+                },
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                logger.error(f"VK ID validation failed: {response.status_code} {response.text}")
+                raise HTTPException(status_code=400, detail="Invalid VK ID token")
+
+            vk_user_data = response.json()
+
+        # Извлекаем данные пользователя
+        user_id = vk_user_data.get("user", {}).get("user_id")
+        first_name = vk_user_data.get("user", {}).get("first_name", "")
+        last_name = vk_user_data.get("user", {}).get("last_name", "")
+        username = f"{first_name} {last_name}".strip()
+
+        if not user_id:
+            logger.error(f"No user_id in VK response: {vk_user_data}")
+            raise HTTPException(status_code=400, detail="Invalid VK response")
+
+        logger.info(f"✅ VK ID validated: user_id={user_id}, name={username}")
+
+        # Создаём/получаем пользователя в БД
+        user_info = get_or_create_user(user_id, "vk", username, first_name)
+
+        # Создаём наш JWT токен
+        jwt_token = create_jwt_token(user_id, "vk")
+
+        logger.info(f"✅ VK ID auth successful: user_id={user_id}")
+
+        return JSONResponse({
+            "access_token": jwt_token,
+            "token_type": "bearer",
+            "user_info": {
+                "user_id": user_info.user_id,
+                "username": user_info.username,
+                "first_name": user_info.first_name,
+                "balance": user_info.balance
+            }
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ VK ID auth error: {e}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
+
+
+# ========================
+# User endpoints
+# ========================
+
+@app.get("/api/user/me")
+async def get_current_user_info(user_id: int = Depends(get_current_user)):
+    """Получить информацию о текущем пользователе"""
+    try:
+        result = execute_query_sync(
+            "SELECT user_id, username, first_name, balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        row = result[0]
+        return UserInfo(
+            user_id=row[0],
+            username=row[1],
+            first_name=row[2],
+            balance=row[3]
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Error getting user info: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.get("/api/user/balance")
+async def get_user_balance(user_id: int = Depends(get_current_user)):
+    """Получить баланс пользователя"""
+    try:
+        result = execute_query_sync(
+            "SELECT balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+
+        if not result:
+            return JSONResponse({"balance": 1})
+
+        return JSONResponse({"balance": result[0][0]})
+
+    except Exception as e:
+        logger.error(f"❌ Error getting balance: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+# ========================
+# Generation endpoints
+# ========================
+
+@app.post("/api/generate/music")
+async def generate_music(request: GenerateMusicRequest, user_id: int = Depends(get_current_user)):
+    """Генерация инструментальной музыки"""
+    try:
+        # Проверяем баланс (кроме админа)
+        if user_id != 338544009:
+            balance_result = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+            balance = balance_result[0][0] if balance_result else 0
+
+            if balance <= 0:
+                raise HTTPException(status_code=402, detail="Insufficient balance")
+
+            # Списываем 1 генерацию
+            execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
+
+        # Запускаем Celery задачу
+        task = generate_music_task.delay(user_id, request.style)
+
+        logger.info(f"✅ Music generation started: user={user_id}, task={task.id}")
+
+        return JSONResponse({
+            "task_id": task.id,
+            "status": "pending",
+            "message": "Генерация началась. Ожидайте результат."
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error generating music: {e}")
+        raise HTTPException(status_code=500, detail="Generation failed")
+
+
+@app.post("/api/generate/lyrics")
+async def generate_lyrics(request: GenerateLyricsRequest, user_id: int = Depends(get_current_user)):
+    """Генерация текста песни через AI"""
+    try:
+        # Проверяем баланс
+        if user_id != 338544009:
+            balance_result = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+            balance = balance_result[0][0] if balance_result else 0
+
+            if balance <= 0:
+                raise HTTPException(status_code=402, detail="Insufficient balance")
+
+            # Списываем 1 генерацию
+            execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
+
+        # Генерируем текст синхронно
+        lyrics = generate_suno_lyrics_sync(request.idea[:200])
+
+        if not lyrics:
+            raise HTTPException(status_code=500, detail="Failed to generate lyrics")
+
+        logger.info(f"✅ Lyrics generated: user={user_id}, length={len(lyrics)}")
+
+        return JSONResponse({
+            "lyrics": lyrics,
+            "idea": request.idea
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error generating lyrics: {e}")
+        raise HTTPException(status_code=500, detail="Generation failed")
+
+
+@app.post("/api/generate/song")
+async def generate_song(request: GenerateSongRequest, user_id: int = Depends(get_current_user)):
+    """Генерация песни с текстом"""
+    try:
+        # Проверяем баланс
+        if user_id != 338544009:
+            balance_result = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+            balance = balance_result[0][0] if balance_result else 0
+
+            if balance <= 0:
+                raise HTTPException(status_code=402, detail="Insufficient balance")
+
+            # Списываем 1 генерацию
+            execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
+
+        # Определяем custom_mode
+        custom_mode = len(request.lyrics) > 500
+
+        # Запускаем Celery задачу
+        task = generate_song_task.delay(user_id, request.lyrics, request.genre, custom_mode)
+
+        logger.info(f"✅ Song generation started: user={user_id}, task={task.id}, custom={custom_mode}")
+
+        return JSONResponse({
+            "task_id": task.id,
+            "status": "pending",
+            "message": "Генерация началась. Ожидайте результат."
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error generating song: {e}")
+        raise HTTPException(status_code=500, detail="Generation failed")
+
+
+@app.get("/api/generation/{task_id}/status")
+async def get_generation_status(task_id: str, user_id: int = Depends(get_current_user)):
+    """Проверить статус генерации"""
+    try:
+        result = execute_query_sync(
+            """
+            SELECT status, audio_url, error_message, created_at
+            FROM generations
+            WHERE task_id = %s AND user_id = %s
+            """,
+            (task_id, user_id)
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Generation not found")
+
+        row = result[0]
+        status_value = row[0]
+        audio_url = row[1]
+        error_message = row[2]
+        created_at = row[3]
+
+        response_data = {
+            "task_id": task_id,
+            "status": status_value,
+            "created_at": created_at.isoformat() if created_at else None
+        }
+
+        if status_value == "completed":
+            # audio_url хранится как JSON массив для демо-системы
+            try:
+                urls = json.loads(audio_url) if isinstance(audio_url, str) else audio_url
+                response_data["audio_urls"] = urls
+                response_data["is_demo"] = True  # Всегда демо 45 сек
+            except:
+                response_data["audio_urls"] = [audio_url]
+                response_data["is_demo"] = True
+        elif status_value == "failed":
+            response_data["error"] = error_message
+
+        return JSONResponse(response_data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error getting generation status: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+# ========================
+# History endpoints
+# ========================
+
+@app.get("/api/history")
+async def get_user_history(user_id: int = Depends(get_current_user), limit: int = 20):
+    """Получить историю генераций пользователя"""
+    try:
+        result = execute_query_sync(
+            """
+            SELECT task_id, prompt, audio_url, status, created_at, custom_mode
+            FROM generations
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (user_id, limit)
+        )
+
+        history = []
+        for row in result:
+            task_id, prompt, audio_url, status_value, created_at, custom_mode = row
+
+            item = {
+                "task_id": task_id,
+                "prompt": prompt,
+                "status": status_value,
+                "created_at": created_at.isoformat() if created_at else None,
+                "custom_mode": custom_mode
+            }
+
+            if status_value == "completed" and audio_url:
+                try:
+                    urls = json.loads(audio_url) if isinstance(audio_url, str) else audio_url
+                    item["audio_urls"] = urls
+                    item["is_demo"] = not audio_url.startswith("ALR_")
+                except:
+                    item["audio_urls"] = [audio_url]
+                    item["is_demo"] = True
+
+            history.append(item)
+
+        return JSONResponse({"history": history})
+
+    except Exception as e:
+        logger.error(f"❌ Error getting history: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+# ========================
+# Payment endpoints (TODO)
+# ========================
+
+@app.post("/api/payment/create")
+async def create_payment(amount: int, user_id: int = Depends(get_current_user)):
+    """Создать платеж через YooKassa (TODO: интеграция)"""
+    # TODO: Интеграция с YooKassa (скопировать логику из main_with_payments.py)
+    raise HTTPException(status_code=501, detail="Payment integration in progress")
+
+
+# ========================
+# Health check
+# ========================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return JSONResponse({
+        "status": "ok",
+        "service": "AlBi Music Web API",
+        "version": "1.0.0"
+    })
+
+
+# ========================
+# Startup
+# ========================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "web_api:app",
+        host="0.0.0.0",
+        port=8001,
+        reload=False,
+        log_level="info"
+    )

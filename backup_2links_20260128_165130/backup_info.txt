@@ -1,0 +1,12 @@
+Бэкап создан: Wed Jan 28 04:51:30 PM MSK 2026
+Цель: Изменение для получения 2 ссылок от Suno API
+Файлы:
+total 160
+drwxr-xr-x  2 root root  4096 Jan 28 16:51 .
+drwxr-xr-x 26 root root 28672 Jan 28 16:51 ..
+-rw-r--r--  1 root root   153 Jan 28 16:51 backup_info.txt
+-rw-r--r--  1 root root   514 Jan 28 16:51 celery_config.py
+-rw-r--r--  1 root root 32774 Jan 28 16:51 celery_tasks.py
+-rw-r--r--  1 root root  5518 Jan 28 16:51 db_utils.py
+-rw-r--r--  1 root root 58752 Jan 28 16:51 main_with_payments.py
+-rw-r--r--  1 root root 10594 Jan 28 16:51 run_monitor_notify.py

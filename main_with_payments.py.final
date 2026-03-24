@@ -1,0 +1,1191 @@
+#!/usr/bin/env python3
+import time
+import logging
+import os
+import asyncio
+import aiohttp
+import sqlite3
+from datetime import datetime
+import hashlib
+
+# Инициализация пула соединений с БД
+from db_utils import init_db_pool_sync
+init_db_pool_sync()
+logging.info("✅ Пул соединений с БД инициализирован")
+
+storage = MemoryStorage()
+dp = Dispatcher(bot=bot, storage=storage)
+
+# Инициализация FastAPI
+app = FastAPI(title="AlBi-music Bot + Payments")
+
+# ЮKassa конфигурация
+YOOKASSA_SHOP_ID = config.YOOKASSA_SHOP_ID
+YOOKASSA_SECRET_KEY = config.YOOKASSA_SECRET_KEY
+YOOKASSA_API_URL = 'https://api.yookassa.ru/v3'
+
+# Лимиты
+MAX_SONG_LENGTH = 3000
+MAX_STYLE_LENGTH = 500
+
+# Состояния FSM
+class MusicStates(StatesGroup):
+    waiting_for_music_style = State()
+
+class SongStates(StatesGroup):
+    waiting_for_song_style = State()
+    waiting_for_lyrics = State()
+    waiting_for_mode = State()
+
+class ChannelPostStates(StatesGroup):
+    waiting_for_comment = State()
+
+# Инициализация базы данных
+def init_db():
+    try:
+        conn = sqlite3.connect('bot.db')
+        cursor = conn.cursor()
+        
+        # Создаем все таблицы одним соединением
+        cursor.executescript('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                free_generation_used BOOLEAN DEFAULT FALSE,
+                invited_by INTEGER DEFAULT NULL,
+                balance INTEGER DEFAULT 0
+            );
+            
+            CREATE TABLE IF NOT EXISTS generations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                task_id TEXT,
+                prompt TEXT,
+                audio_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_free BOOLEAN DEFAULT FALSE,
+                custom_mode BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            );
+            
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                referred_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                bonus_applied BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (referrer_id) REFERENCES users (user_id),
+                FOREIGN KEY (referred_id) REFERENCES users (user_id)
+            );
+            
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                status TEXT,
+                payment_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            );
+            
+            CREATE TABLE IF NOT EXISTS user_tokens (
+                user_id INTEGER PRIMARY KEY,
+                access_token TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS channel_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                audio_url TEXT,
+                comment TEXT,
+                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                message_id INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            );
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logging.info("✅ База данных инициализирована успешно")
+    except sqlite3.Error as e:
+        logging.error(f"❌ Ошибка инициализации БД: {e}")
+
+# ... (остальной код будет следующим шагом)
+
+# Функции работы с БД
+async def add_user(user_id, username, first_name, invited_by=None):
+    try:
+        from postgres_db import execute_query
+        await execute_query(
+            'INSERT INTO users (user_id, username, first_name, invited_by, balance) VALUES ($1, $2, $3, $4, 1) ON CONFLICT (user_id) DO NOTHING', 
+            user_id, username, first_name, invited_by
+        )
+    except Exception as e:
+        logging.error(f"❌ Ошибка добавления пользователя {user_id}: {e}")
+
+def get_user_balance(user_id):
+    try:
+        from db_utils import execute_query_sync
+        result = execute_query_sync('SELECT balance FROM users WHERE user_id = %s', (user_id,))
+        if result:
+            balance = result[0][0]
+            if balance > 0:
+                return f"💰 {balance} доступных генераций"
+            else:
+                return "❌ 0 доступных генераций"
+        return "🎁 1 бесплатная генерация (новый пользователь)"
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения баланса {user_id}: {e}")
+        return "❌ Ошибка получения баланса"
+
+
+
+
+def get_balance_number(user_id):
+    """Возвращает числовой баланс пользователя"""
+    try:
+        from db_utils import execute_query_sync
+        result = execute_query_sync('SELECT balance FROM users WHERE user_id = %s', (user_id,))
+        if result:
+            return result[0][0]
+        return 1  # Новый пользователь
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения числового баланса {user_id}: {e}")
+        return 0
+
+
+def mark_free_generation_used(user_id):
+    try:
+        from db_utils import execute_query_sync
+        # Отмечаем что бесплатная генерация использована
+        execute_query_sync('UPDATE users SET free_generation_used = TRUE WHERE user_id = %s', (user_id,))
+        # Уменьшаем баланс на 1
+        execute_query_sync('UPDATE users SET balance = balance - 1 WHERE user_id = %s', (user_id,))
+        logging.info(f"✅ Отмечена бесплатная генерация для пользователя {user_id}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка отметки бесплатной генерации {user_id}: {e}")
+
+def add_balance(user_id, amount):
+    try:
+        conn = sqlite3.connect('bot.db')
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        logging.error(f"❌ Ошибка добавления баланса {user_id}: {e}")
+
+def add_generation(user_id, task_id, prompt, audio_url, is_free=False, custom_mode=False):
+    try:
+        from db_utils import execute_query_sync
+        execute_query_sync(
+            'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s, %s)', 
+            (user_id, task_id, prompt, audio_url, is_free, custom_mode)
+        )
+    except Exception as e:
+        logging.error(f"❌ Ошибка добавления генерации {user_id}: {e}")
+
+def add_payment(user_id, amount, status, payment_id):
+    try:
+        conn = sqlite3.connect('bot.db')
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO payments (user_id, amount, status, payment_id) VALUES (?, ?, ?, ?)', 
+                      (user_id, amount, status, payment_id))
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        logging.error(f"❌ Ошибка добавления платежа {user_id}: {e}")
+
+def update_payment_status(payment_id, status):
+    try:
+        conn = sqlite3.connect('bot.db')
+        cursor = conn.cursor()
+        cursor.execute('UPDATE payments SET status = ? WHERE payment_id = ?', (status, payment_id))
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        logging.error(f"❌ Ошибка обновления платежа {payment_id}: {e}")
+
+def is_admin(user_id):
+    return user_id == 338544009
+
+def get_admin_stats():
+    """Получить статистику из PostgreSQL (синхронная версия)"""
+    try:
+        # Импортируем синхронные функции БД
+        from db_utils import execute_query_sync
+        
+        # 1. Всего пользователей (из таблицы users)
+        users_result = execute_query_sync("SELECT COUNT(*) as total FROM users")
+        total_users = users_result[0][0] if users_result and users_result[0] else 0
+        
+        # 2. Новых сегодня (из таблицы users)
+        new_today_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE")
+        new_today = new_today_result[0][0] if new_today_result and new_today_result[0] else 0
+        
+        # 3. Новых за 7 дней
+        new_7days_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'")
+        new_7days = new_7days_result[0][0] if new_7days_result and new_7days_result[0] else 0
+        
+        # 4. Новых за 30 дней
+        new_30days_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'")
+        new_30days = new_30days_result[0][0] if new_30days_result and new_30days_result[0] else 0
+        
+        # 5. Всего генераций
+        generations_result = execute_query_sync("SELECT COUNT(*) as total FROM generations")
+        total_generations = generations_result[0][0] if generations_result and generations_result[0] else 0
+        
+        # 6. Успешных генераций (completed)
+        completed_result = execute_query_sync("SELECT COUNT(*) as total FROM generations WHERE status = 'completed'")
+        completed_generations = completed_result[0][0] if completed_result and completed_result[0] else 0
+        
+        # 7. Процент успешных
+        success_rate = round((completed_generations * 100.0) / total_generations, 1) if total_generations > 0 else 0
+        
+        # 8. Оплаченных генераций - ПРАВИЛЬНЫЙ ПОДСЧЕТ через таблицу payments
+        # Получаем пользователей с успешными платежами
+        paid_users_result = execute_query_sync("""
+            SELECT DISTINCT user_id 
+            FROM payments 
+            WHERE status = 'succeeded'
+        """)
+        
+        if paid_users_result:
+            paid_user_ids = [str(row[0]) for row in paid_users_result]
+            paid_users_str = ','.join(paid_user_ids)
+            
+            # Генерации от пользователей с успешными платежами
+            paid_7days_result = execute_query_sync(f"""
+                SELECT COUNT(*) as total 
+                FROM generations 
+                WHERE user_id IN ({paid_users_str})
+                AND status = 'completed'
+                AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+            """)
+            
+            paid_24h_result = execute_query_sync(f"""
+                SELECT COUNT(*) as total 
+                FROM generations 
+                WHERE user_id IN ({paid_users_str})
+                AND status = 'completed'
+                AND created_at >= NOW() - INTERVAL '24 hours'
+            """)
+            
+            paid_total_result = execute_query_sync(f"""
+                SELECT COUNT(*) as total 
+                FROM generations 
+                WHERE user_id IN ({paid_users_str})
+                AND status = 'completed'
+            """)
+        else:
+            paid_7days_result = [[0]]
+            paid_24h_result = [[0]]
+            paid_total_result = [[0]]
+        
+        paid_7days = paid_7days_result[0][0] if paid_7days_result and paid_7days_result[0] else 0
+        paid_24h = paid_24h_result[0][0] if paid_24h_result and paid_24h_result[0] else 0
+        paid_total = paid_total_result[0][0] if paid_total_result and paid_total_result[0] else 0
+        
+        # 9. Приглашенных сегодня (по таблице users)
+        invited_today_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE AND invited_by IS NOT NULL")
+        invited_today = invited_today_result[0][0] if invited_today_result and invited_today_result[0] else 0
+        
+        return {
+            'total_users': total_users,
+            'new_today': new_today,
+            'new_7days': new_7days,
+            'new_30days': new_30days,
+            'total_generations': total_generations,
+            'completed_generations': completed_generations,
+            'success_rate': success_rate,
+            'paid_7days': paid_7days,
+            'paid_24h': paid_24h,
+            'paid_total': paid_total,
+            'invited_today': invited_today
+        }
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения статистики: {e}")
+        return {
+            'total_users': 0,
+            'new_today': 0,
+            'new_7days': 0,
+            'new_30days': 0,
+            'total_generations': 0,
+            'completed_generations': 0,
+            'success_rate': 0,
+            'paid_7days': 0,
+            'paid_24h': 0,
+            'paid_total': 0,
+            'invited_today': 0
+        }
+async def create_yookassa_payment(user_id, amount, description):
+    headers = {
+        'Idempotence-Key': str(uuid.uuid4()),
+        'Content-Type': 'application/json'
+    }
+    data = {
+        "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+        "capture": True,
+        "confirmation": {
+            "type": "redirect",
+            "return_url": "https://albi-music.ru/payment/success"
+        },
+        "description": description,
+        "metadata": {"user_id": user_id}
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f'{YOOKASSA_API_URL}/payments',
+                json=data,
+                headers=headers,
+                auth=aiohttp.BasicAuth(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)
+            ) as response:
+                result = await response.json()
+                logging.info(f"ЮKassa payment response: {result}")
+                return result
+    except Exception as e:
+        logging.error(f"❌ ЮKassa API error: {e}")
+        return None
+async def generate_suno_music(prompt, is_song=False, custom_mode=False, user_id=None):
+    async with aiohttp.ClientSession() as session:
+        headers = {
+            "Authorization": f"Bearer {config.SUNO_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        if is_song:
+            if custom_mode:
+                data = {
+                    "prompt": prompt,
+                    "customMode": True,
+                    "instrumental": False,
+                    "model": "V5",
+                    "callBackUrl": "https://example.com/callback"
+                }
+            else:
+                data = {
+                    "prompt": prompt,
+                    "customMode": False,
+                    "instrumental": False,
+                    "model": "V5",
+                    "callBackUrl": "https://example.com/callback"
+                }
+        else:
+            data = {
+                "prompt": prompt,
+                "customMode": False,
+                "instrumental": True,
+                "model": "V5",
+                "callBackUrl": "https://example.com/callback"
+            }
+        try:
+            async with session.post(f"{config.SUNO_API_URL}/api/v1/generate", json=data, headers=headers) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    task_id = result['data']['taskId']
+                    logging.info(f"🎵 Задача создана: {task_id} для пользователя {user_id}")
+                    for i in range(30):
+                        await asyncio.sleep(10)
+                        async with session.get(f"{config.SUNO_API_URL}/api/v1/generate/record-info?taskId={task_id}", headers=headers) as status_response:
+                            if status_response.status == 200:
+                                status_result = await status_response.json()
+                                status = status_result.get('data', {}).get('status')
+                                logging.info(f"📊 Статус задачи {task_id}: {status} (попытка {i+1})")
+                                if status == 'SUCCESS':
+                                    audio_data = status_result.get('data', {}).get('response', {}).get('sunoData', [])
+                                    if audio_data:
+                                        audio_url = audio_data[0].get('audioUrl')
+                                        logging.info(f"✅ Генерация завершена для пользователя {user_id}")
+                                        return audio_url
+                                elif status in ['PENDING', 'TEXT_SUCCESS', 'FIRST_SUCCESS']:
+                                    continue
+                                else:
+                                    logging.error(f"❌ Ошибка генерации: {status} для пользователя {user_id}")
+                                    return None
+                    logging.error(f"⏰ Время ожидания истекло для пользователя {user_id}")
+                    return None
+                else:
+                    error_text = await response.text()
+                    logging.error(f"❌ Ошибка API: {error_text} для пользователя {user_id}")
+                    return None
+        except Exception as e:
+            logging.error(f"❌ Ошибка генерации для пользователя {user_id}: {e}")
+            return None
+
+# Фоновая обработка генерации
+async def process_generation_background(user_id, style, lyrics, is_song, is_free, custom_mode, processing_msg_id, chat_id):
+    try:
+
+        # === ГЕНЕРИРУЕМ task_id ЗАРАНЕЕ ДЛЯ ГАРАНТИИ ===
+
+        import uuid
+
+        celery_task_id = str(uuid.uuid4())
+
+        
+
+        logging.info(f"🆔 Создан task_id для Celery: {celery_task_id}")
+
+        
+
+        # Отправляем задачу в Celery с явным task_id
+
+        if is_song:
+
+            task = generate_song_task.apply_async(
+
+                args=(user_id, lyrics, style, custom_mode),
+
+                kwargs={'task_id': celery_task_id},
+
+                task_id=celery_task_id  # ✅ Передаем ID самой задаче Celery
+
+            )
+
+        else:
+
+            task = generate_music_task.apply_async(
+
+                args=(user_id, style),
+
+                kwargs={'task_id': celery_task_id},
+
+                task_id=celery_task_id  # ✅ Передаем ID самой задаче Celery
+
+            )
+
+        
+
+        logging.info(f"✅ Celery задача отправлена: {task.id}")
+        
+        logging.info(f"🚀 Задача отправлена в Celery: {task.id} для пользователя {user_id}")
+        
+        # Сохраняем task_id в БД
+        add_generation(user_id, task.id, f"Стиль: {style}" + (f". Текст: {lyrics}" if is_song else ""), "", is_free, custom_mode)
+        
+        # Отправляем сообщение о начале обработки
+        await bot.send_message(chat_id, "⏳ **Генерация вашей композиции началась!**\n\n⏰ Подождите пожалуйста 3-5 минут. Результат я пришлю вам сюда в чат!", parse_mode="Markdown")
+        
+        try:
+            await bot.delete_message(chat_id, processing_msg_id)
+        except:
+            pass
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка отправки задачи в Celery: {e}")
+        try:
+            await bot.delete_message(chat_id, processing_msg_id)
+        except:
+            pass
+        await bot.send_message(chat_id, "❌ Произошла ошибка при постановке задачи в очередь. Попробуйте позже.")
+
+# Клавиатуры
+def get_main_menu_keyboard(user_id=None):
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("🎵 Создать песню"))
+    markup.add(KeyboardButton("💰 Баланс"), KeyboardButton("🎧 Примеры песен"))
+    if user_id and is_admin(user_id):
+        markup.add(KeyboardButton("👨‍💻 Админ панель"))
+    return markup
+
+def get_song_type_keyboard():
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🎤 Песня с текстом", callback_data="create_song"),
+        InlineKeyboardButton("🎵 Инструментальная музыка", callback_data="create_music")
+    )
+    return markup
+
+def get_generation_mode_keyboard():
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🎯 Точный режим (только мой текст)", callback_data="mode_exact"),
+        InlineKeyboardButton("🎨 Творческий режим (ИИ может дополнять)", callback_data="mode_creative")
+    )
+    return markup
+
+def get_balance_keyboard(user_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("📄 Документы", callback_data="show_documents"),
+        InlineKeyboardButton("🌟 Пригласить друга (+2 бесплатно)", callback_data="invite_friend"),
+        InlineKeyboardButton("💳 Оплатить 50 руб (1 генерация)", callback_data="pay_50"),
+        InlineKeyboardButton("🔥 Оплатить 400 руб (10 генераций)", callback_data="pay_400")
+    )
+    return markup
+
+def get_admin_keyboard():
+    """Упрощенная клавиатура админ-панели (только 2 кнопки)"""
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+        InlineKeyboardButton("🔍 Проверить Suno API", callback_data="check_suno_api")
+    )
+    return markup
+
+# ... (продолжение следует)
+
+# FastAPI роуты
+@app.get("/")
+async def root():
+    return {"message": "AlBi-music Bot + Payments is running"}
+
+@app.get("/payment/success")
+async def payment_success():
+    html_content = """
+    <!DOCTYPE html><html><head><title>Оплата успешна</title><meta charset="UTF-8">
+    <style>body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+    .success { color: green; font-size: 24px; }</style></head>
+    <body><div class="success">✅ Оплата прошла успешно!</div>
+    <p>Вернитесь в бота @AlBimusic_bot - генерация уже начислена</p></body></html>
+    """
+    return HTMLResponse(html_content)
+
+@app.get("/payment/failed")
+async def payment_failed():
+    html_content = """
+    <!DOCTYPE html><html><head><title>Оплата не прошла</title><meta charset="UTF-8">
+    <style>body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+    .error { color: red; font-size: 24px; }</style></head>
+    <body><div class="error">❌ Оплата не прошла</div>
+    <p>Попробуйте снова или обратитесь в поддержку</p></body></html>
+    """
+    return HTMLResponse(html_content)
+
+@app.post("/webhook/yookassa")
+async def yookassa_webhook(request: Request):
+    try:
+        notification = await request.json()
+        logging.info(f"Webhook от ЮKassa: {notification}")
+        if notification.get('event') == 'payment.succeeded':
+            payment = notification.get('object', {})
+            user_id = payment.get('metadata', {}).get('user_id')
+            amount = float(payment.get('amount', {}).get('value', 0))
+            if user_id and amount:
+                if amount == 50.00:
+                    generations = 1
+                elif amount == 400.00:
+                    generations = 10
+                else:
+                    generations = 1
+                add_balance(user_id, generations)
+                add_payment(user_id, amount, 'succeeded', payment.get('id'))
+                logging.info(f"✅ Начислено {generations} генераций пользователю {user_id}")
+                try:
+                    await bot.send_message(user_id, f"✅ Оплата получена!\n\n💰 На ваш баланс начислено: {generations} генераций\n\n🎵 Теперь вы можете создавать песни!")
+                except Exception as e:
+                    logging.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {e}")
+                return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ignored"})
+    except Exception as e:
+        logging.error(f"❌ Ошибка webhook: {e}")
+        return JSONResponse({"status": "error"}, status_code=400)
+
+# Обработчики Telegram бота
+@dp.message_handler(Command('start'))
+async def cmd_start(message: types.Message):
+    user = message.from_user
+    invited_by = None
+    if len(message.text.split()) > 1:
+        ref_param = message.text.split()[1]
+        if ref_param.startswith('ref_'):
+            try:
+                invited_by = int(ref_param.split('_')[1])
+            except:
+                pass
+    await add_user(user.id, user.username, user.first_name, invited_by)
+    if invited_by and invited_by != user.id:
+        try:
+            # Используем PostgreSQL для реферальной системы
+            from postgres_db import execute_query
+            result = await execute_query(
+                'SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND referred_id = $2',
+                invited_by, user.id
+            )
+            if result and result[0][0] == 0:
+                # Первое приглашение - добавляем 2 генерации
+                await execute_query(
+                    'INSERT INTO referrals (referrer_id, referred_id, created_at) VALUES ($1, $2, NOW())',
+                    invited_by, user.id
+                )
+                await execute_query(
+                    'UPDATE users SET balance = balance + 2 WHERE user_id = $1',
+                    invited_by
+                )
+                try:
+                    await bot.send_message(invited_by, f"🎉 По вашей ссылке зарегистрировался новый пользователь!\n\n💰 Вам начислено 2 бесплатные генерации!")
+                except:
+                    pass
+        except sqlite3.Error as e:
+            logging.error(f"❌ Ошибка обработки реферала: {e}")
+    
+    welcome_text = """🎵 *Привет! Я AlBi-music — твой личный композитор с искусственным интеллектом!*
+
+✨ **Попробуй — БЕСПЛАТНО!** 
+
+📊 *Что ты можешь:*
+• 🎵 Создать музыку *под настроение*
+- или для видеоролика 
+- или для тренировки 
+- или для медитации!
+• 🔥 Создать свою *ПЕСНЮ* - просто дай мне стихи и я создам тебе шедевр!
+
+🚀 *Прямо сейчас* нажми кнопку "Создать песню"!"""
+    await message.answer(welcome_text, reply_markup=get_main_menu_keyboard(user.id), parse_mode="Markdown")
+
+@dp.message_handler(lambda message: message.text == "🎵 Создать песню")
+async def handle_create_song(message: types.Message):
+    await message.answer("🎛️ Выберите тип создания:", reply_markup=get_song_type_keyboard())
+
+@dp.message_handler(lambda message: message.text == "💰 Баланс")
+async def handle_balance(message: types.Message):
+    balance = get_user_balance(message.from_user.id)
+    text = f"💰 *Ваш баланс:* {balance}\n\n💳 *Пополнить баланс:*\n• Пригласите друга = +2 бесплатно\n• 50 рублей = 1 генерация\n• 400 рублей = 10 генераций\n\n🎁 *Первая генерация бесплатна!*"
+    await message.answer(text, reply_markup=get_balance_keyboard(message.from_user.id), parse_mode="Markdown")
+
+@dp.message_handler(lambda message: message.text == "🎧 Примеры песен")
+async def handle_song_examples(message: types.Message):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🚀 Перейти в канал AL BI Chart", url="https://t.me/ALBImusic_chart")
+    )
+    
+    text = (
+        "🎧 **Примеры песен**\n\n"
+        "Слушайте примеры песен, созданных нашим ботом, в официальном канале AL BI Chart!\n\n"
+        "🎵 Здесь вы найдете:\n"
+        "• Лучшие треки, созданные пользователями\n"
+        "• Различные музыкальные жанры\n"
+        "• Вдохновение для ваших собственных композиций\n\n"
+        "Присоединяйтесь к нашему музыкальному сообществу!"
+    )
+    
+    await message.answer(text, reply_markup=markup, parse_mode="Markdown")
+@dp.message_handler(lambda message: message.text == "📄 Документы")
+async def handle_documents(message: types.Message):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("📜 Политика конфиденциальности", callback_data="show_privacy"),
+        InlineKeyboardButton("📄 Публичная оферта", callback_data="show_offer")
+    )
+    await message.answer("📄 *Правовые документы:*", reply_markup=markup, parse_mode="Markdown")
+
+@dp.message_handler(lambda message: message.text == "👨‍💻 Админ панель")
+async def handle_admin_panel(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("👨‍💻 *Панель администратора:*", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+    else:
+        await message.answer("⛔ Доступ запрещен")
+
+# ... (продолжение следует)
+
+# Callback обработчики
+@dp.callback_query_handler(lambda c: c.data == 'create_song')
+async def process_create_song(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, "🎤 *Отлично! Сначала опишите стиль песни:*\n\n• Жанр (рок, поп, хип-хоп, классика...)\n• Музыкальные инструменты\n• Мужской/женский голос\n• Темп, настроение", parse_mode="Markdown")
+    await SongStates.waiting_for_song_style.set()
+
+@dp.callback_query_handler(lambda c: c.data == 'create_music')
+async def process_create_music(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, "🎵 *Опишите стиль музыки:*\n\n• Жанр и направление\n• Музыкальные инструменты\n• Ритм и темп\n• Настроение и атмосфера", parse_mode="Markdown")
+    await MusicStates.waiting_for_music_style.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
+async def process_payment(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    if callback_query.data == 'pay_50':
+        amount = 50
+        generations = 1
+        description = "Пополнение баланса: 1 генерация"
+    else:
+        amount = 400
+        generations = 10
+        description = "Пополнение баланса: 10 генераций"
+    payment = await create_yookassa_payment(user_id, amount, description)
+    if payment and payment.get('confirmation', {}).get('confirmation_url'):
+        payment_url = payment['confirmation']['confirmation_url']
+        payment_id = payment['id']
+        add_payment(user_id, amount, 'pending', payment_id)
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("💳 Перейти к оплате", url=payment_url))
+        await bot.send_message(user_id, f"💳 *Оплата {amount} рублей*\n\n🎵 Вы получите: {generations} генераций\n\n✅ После успешной оплаты баланс пополнится автоматически в течение 1-2 минут.", reply_markup=keyboard, parse_mode="Markdown")
+    else:
+        await bot.send_message(user_id, "❌ Ошибка при создании платежа. Попробуйте позже.")
+
+@dp.callback_query_handler(lambda c: c.data == 'invite_friend')
+async def process_invite_friend(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    referral_link = f"https://t.me/AlBimusic_bot?start=ref_{user_id}"
+    
+    # Отправляем сразу два сообщения подряд
+    await bot.send_message(user_id, "Чтобы получить 2 генерации бесплатно, скопируйте сообщение ниже и отправьте его другу 👇")
+    
+    ready_text = f"""Привет! Я нашел крутого бота для создания музыки с помощью Искусственного Интеллекта. Попробуй! Там первая генерация песни в подарок. Бот может просто музыку написать по описанию, а может реальную песню, если ему стихи загрузишь.
+Прикольная штука :)
+Вот ссылка - {referral_link}
+Реально круто! ✨"""
+    
+    await bot.send_message(user_id, ready_text)
+# ========================================
+# CALLBACK: ПОКАЗАТЬ ДОКУМЕНТЫ (ИЗ МЕНЮ БАЛАНСА)
+# ========================================
+
+@dp.callback_query_handler(lambda c: c.data == "show_documents")
+async def show_documents_callback(callback_query: types.CallbackQuery):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("📜 Политика конфиденциальности", callback_data="show_privacy"),
+        InlineKeyboardButton("📄 Публичная оферта", callback_data="show_offer")
+    )
+    
+    await callback_query.message.edit_text(
+        "📄 **Правовые документы:**",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    
+    await callback_query.answer()
+
+
+@dp.callback_query_handler(lambda c: c.data == 'show_privacy')
+async def show_privacy(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, "📜 Политика конфиденциальности: https://albi-music.ru/documents/privacy.html")
+
+@dp.callback_query_handler(lambda c: c.data == 'show_offer')
+async def show_offer(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, "📄 Публичная оферта: https://albi-music.ru/documents/offer.html")
+
+
+@dp.callback_query_handler(lambda c: c.data == 'admin_stats')
+async def process_admin_stats(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    if not is_admin(callback_query.from_user.id):
+        return
+    stats = get_admin_stats()
+    
+    # Формируем текст статистики с проверкой наличия полей
+    text = f"""📊 *Статистика бота:*
+
+👥 Всего пользователей: {stats.get("total_users", 0)}
+🆕 Новых сегодня: {stats.get("new_today", 0)}
+📈 Новых за 7 дней: {stats.get("new_7days", 0)}
+📅 Новых за 30 дней: {stats.get("new_30days", 0)}
+
+🎵 Всего генераций: {stats.get("total_generations", 0)} шт
+✅ Успешных: {stats.get("success_rate", 0)}%
+
+💰 Оплаченных за 7 дней: {stats.get("paid_7days", 0)}
+⏰ Оплаченных за 24 часа: {stats.get("paid_24h", 0)}
+📊 Всего оплаченных: {stats.get("paid_total", 0)}
+
+👥 Приглашенных сегодня: {stats.get("invited_today", 0)}"""
+
+    # Добавляем дополнительную информацию о платежах
+    if stats.get("paid_total", 0) == 0:
+        text += "\n\n⚠️ *Внимание:* Нет успешных платежей (status = succeeded)"
+    
+    await bot.send_message(callback_query.from_user.id, text, parse_mode="Markdown")
+
+# @dp.callback_query_handler(lambda c: c.data == 'admin_credits')
+# async def process_admin_credits(callback_query: types.CallbackQuery):
+#     await bot.answer_callback_query(callback_query.id)
+#     await bot.send_message(callback_query.from_user.id, f"💰 Кредитов Suno: {get_suno_credits()}")
+# 
+
+@dp.callback_query_handler(lambda c: c.data == 'check_suno_api')
+async def check_suno_api_status(callback_query: types.CallbackQuery):
+    """Проверка РЕАЛЬНЫХ путей Suno API (из celery_tasks.py)"""
+    await bot.answer_callback_query(callback_query.id)
+    
+    if not is_admin(callback_query.from_user.id):
+        return
+    
+    status_msg = await bot.send_message(callback_query.from_user.id, 
+        "🔍 *Проверяю рабочие endpoints Suno API...*", 
+        parse_mode="Markdown")
+    
+    try:
+        import requests
+        import time
+        import sys
+        sys.path.insert(0, '.')
+        from config import SUNO_API_KEY, SUNO_API_URL
+        
+        # РЕАЛЬНЫЕ пути из celery_tasks.py
+        tests = [
+            {
+                "url": f"{SUNO_API_URL}/api/v1/generate",
+                "method": "POST",
+                "name": "Создание задачи (/api/v1/generate)",
+                "data": {"prompt": "test", "instrumental": True}  # Минимальный тестовый запрос
+            },
+            {
+                "url": f"{SUNO_API_URL}/api/v1/generate/record-info",
+                "method": "GET", 
+                "name": "Проверка статуса (/api/v1/generate/record-info)",
+                "params": {"taskId": "test_task_123"}  # Тестовый ID
+            },
+        ]
+        
+        headers = {
+            "Authorization": f"Bearer {SUNO_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        results = []
+        suno_working = False
+        
+        for test in tests:
+            try:
+                start = time.time()
+                
+                if test['method'] == 'POST':
+                    response = requests.post(
+                        test['url'], 
+                        json=test.get('data', {}), 
+                        headers=headers, 
+                        timeout=15
+                    )
+                else:  # GET
+                    response = requests.get(
+                        test['url'], 
+                        params=test.get('params', {}),
+                        headers=headers, 
+                        timeout=15
+                    )
+                
+                elapsed = time.time() - start
+                
+                if response.status_code == 200:
+                    results.append(f"✅ {test['name']}: 200 OK ({elapsed:.1f} сек)")
+                    suno_working = True
+                elif response.status_code == 401:
+                    results.append(f"🔒 {test['name']}: 401 (Проблема с API ключом)")
+                elif response.status_code == 404:
+                    results.append(f"❌ {test['name']}: 404 (Путь не найден)")
+                elif response.status_code == 429:
+                    results.append(f"⚠️ {test['name']}: 429 (Слишком много запросов)")
+                elif response.status_code == 503:
+                    results.append(f"🚧 {test['name']}: 503 (Сервис перегружен)")
+                else:
+                    results.append(f"⚠️ {test['name']}: HTTP {response.status_code}")
+                
+                # Добавляем детали ответа для диагностики
+                if response.status_code != 200:
+                    try:
+                        error_detail = response.json()
+                        results.append(f"   Ответ: {str(error_detail)[:150]}")
+                    except:
+                        results.append(f"   Текст: {response.text[:100]}")
+                    
+            except requests.exceptions.Timeout:
+                results.append(f"⏰ {test['name']}: Таймаут")
+            except requests.exceptions.ConnectionError:
+                results.append(f"🔌 {test['name']}: Ошибка соединения")
+            except Exception as e:
+                results.append(f"❌ {test['name']}: {str(e)[:50]}")
+        
+        # Формируем отчет
+        from datetime import datetime
+        report_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+        
+        report = f"*Проверка Suno API*\n⏰ {report_time}\n\n"
+        report += "\n".join(results)
+        
+        # Добавляем итоговый вердикт
+        report += "\n\n📢 *Вердикт:* "
+        if suno_working:
+            report += "✅ API отвечает корректно"
+        else:
+            report += "❌ Есть проблемы с подключением"
+        
+        await status_msg.edit_text(report, parse_mode="Markdown")
+        
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ *Ошибка проверки:*\n`{str(e)[:150]}`", 
+            parse_mode="Markdown"
+        )
+
+@dp.message_handler(state=SongStates.waiting_for_lyrics)
+async def process_song_lyrics(message: types.Message, state: FSMContext):
+    if len(message.text) > MAX_SONG_LENGTH:
+        await message.answer(f"❌ Слишком длинный текст. Максимум {MAX_SONG_LENGTH} символов.")
+        return
+    await state.update_data(lyrics=message.text)
+    await SongStates.waiting_for_mode.set()
+    await message.answer("🎵 *Выберите режим генерации:*\n\n🎯 *Точный режим* - Suno использует ТОЛЬКО ваш текст\n🎨 *Творческий режим* - Suno может дополнять и улучшать текст\n\n**Какой режим предпочитаете?**", reply_markup=get_generation_mode_keyboard(), parse_mode="Markdown")
+
+@dp.message_handler(state=SongStates.waiting_for_song_style)
+async def process_song_style(message: types.Message, state: FSMContext):
+    if len(message.text) > MAX_STYLE_LENGTH:
+        await message.answer(f"❌ Слишком длинное описание. Максимум {MAX_STYLE_LENGTH} символов.")
+        return
+    await state.update_data(style=message.text)
+    await SongStates.waiting_for_lyrics.set()
+    await message.answer(f"🎤 *Теперь введите текст вашей песни:*\n\n📝 Максимум {MAX_SONG_LENGTH} символов\n\n**Пример:**\nЯ иду по улице,\nСолнце светит ярко...", parse_mode="Markdown")
+
+@dp.message_handler(state=MusicStates.waiting_for_music_style)
+async def process_music_style(message: types.Message, state: FSMContext):
+    if len(message.text) > MAX_STYLE_LENGTH:
+        await message.answer(f"❌ Слишком длинное описание. Максимум {MAX_STYLE_LENGTH} символов.")
+        return
+    style = message.text
+    user_id = message.from_user.id
+    balance_num = get_balance_number(user_id)
+    if balance_num <= 0 and not is_admin(user_id):
+        await message.answer("❌ Зайдите пожалуйста в баланс и оплатите генерацию либо пригласите друга и мы подарим вам 2 генерации бесплатно!", reply_markup=get_main_menu_keyboard(user_id))
+        await state.finish()
+        return
+    processing_msg = await message.answer("⏳ *Ваша музыкальная композиция генерируется!*\n\n⏰ Подождите 3-5 минут. Результат я пришлю вам сюда в чат.", parse_mode="Markdown")
+    # Получаем информацию о бесплатных генерациях из БД
+    result = execute_query_sync(
+        "SELECT balance, free_generation_used FROM users WHERE user_id = %s",
+        (user_id,)
+    )
+    user_data = result[0] if result else None
+    
+    # Определяем тип генерации на основе данных из БД
+    if user_data:
+        balance = user_data[0]  # balance (integer)
+        free_generation_used = user_data[1]  # free_generation_used (boolean)
+        
+        # Проверяем доступность бесплатной генерации
+        if not free_generation_used and not is_admin(user_id):
+            mark_free_generation_used(user_id)
+            is_free = True
+        elif balance > 0:
+            is_free = False
+        else:
+            await message.answer("❌ Недостаточно генераций. Используйте /premium для покупки.")
+            return
+    else:
+        await message.answer("❌ Ошибка получения данных пользователя")
+        return
+    await state.finish()
+    asyncio.create_task(process_generation_background(user_id, style, "", False, is_free, False, processing_msg.message_id, message.chat.id))
+
+# Функция отправки поста в канал
+async def send_to_channel(audio_url, comment, user_info):
+    try:
+        # Экранируем специальные символы Markdown в комментарии
+        from aiogram.utils.markdown import escape_md
+        safe_comment = escape_md(comment)
+        safe_user_info = escape_md(user_info)
+        
+        # Форматируем сообщение для канала
+        caption = f"🎵 *Новая AI-песня!*\n\n{safe_comment}\n\n" + \
+                 f"👤 Автор: {safe_user_info}\n" + \
+                 f"🔗 Скачать: {audio_url}\n\n" + \
+                 f"\#AIмузыка \#AlBiMusic"
+        
+        # Отправляем аудио в канал
+        message = await bot.send_audio(
+            chat_id=config.CHANNEL_USERNAME,
+            audio=audio_url,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+        
+        logging.info(f"✅ Пост подготовлен для канала: {comment[:50]}...")
+        return True
+    except Exception as e:
+        logging.error(f"❌ Ошибка отправки в канал: {e}")
+        return False
+def add_channel_post(user_id, audio_url, comment, message_id=None):
+    """Сохраняет публикацию в PostgreSQL"""
+    try:
+        from db_utils import execute_query_sync
+        
+        result = execute_query_sync(
+            "INSERT INTO channel_posts (user_id, audio_url, comment, message_id, created_at) VALUES (%s, %s, %s, %s, NOW())",
+            (user_id, audio_url, comment, message_id)
+        )
+        
+        logging.info(f"✅ Публикация сохранена для пользователя {user_id}")
+        return True
+    except Exception as e:
+        logging.error(f"❌ Ошибка сохранения публикации {user_id}: {e}")
+        return False
+
+@dp.message_handler(state=ChannelPostStates.waiting_for_comment)
+async def process_channel_comment(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    audio_url = user_data.get('audio_url')
+    comment = message.text
+    user_id = message.from_user.id
+    
+    # Получаем информацию о пользователе
+    user = await bot.get_chat(user_id)
+    user_info = f"@{user.username}" if user.username else f"{user.first_name}"
+    
+    # Отправляем в канал (пока только логируем)
+    success = await send_to_channel(audio_url, comment, user_info)
+    
+    if success:
+        # Сохраняем в БД
+        add_channel_post(user_id, audio_url, comment)
+        await message.answer(
+            "✅ Ваша песня опубликована в канале!\n\n" +
+            f"📝 Ваш комментарий: {comment}\n\n" +
+            "📢 Посмотреть в канале: @ALBImusic_chart\n\n" +
+            "Спасибо за участие в нашем музыкальном сообществе! 🎶"
+        )
+    else:
+        await message.answer(
+            "❌ *Не удалось опубликовать песню.*\n\n" +
+            "Попробуйте позже или обратитесь в поддержку.", 
+            parse_mode="Markdown"
+        )
+    
+    await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('post_'))
+async def process_post_to_channel(callback_query: types.CallbackQuery, state: FSMContext):
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    message = callback_query.message
+    
+    # Извлекаем реальный audio_url из сообщения с результатом генерации
+
+# ========== ОБРАБОТЧИК РЕЖИМА ГЕНЕРАЦИИ ==========
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('mode_'), state='*')
+async def process_generation_mode(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора режима генерации"""
+    try:
+        await callback_query.answer()
+        
+        mode = callback_query.data.replace('mode_', '')
+        mode_name = 'Точный режим' if mode == 'exact' else 'Творческий режим'
+        
+        logger.info(f"User {callback_query.from_user.id} selected mode: {mode}")
+        
+        # Сохраняем режим в состояние
+        await state.update_data(generation_mode=mode)
+        
+        # Уведомляем пользователя
+        await callback_query.message.answer(
+            f"✅ Выбран: {mode_name}\n\n"
+            "Генерация началась, ожидайте результат..."
+        )
+        
+        # Здесь можно добавить запуск генерации
+        # Пока просто завершаем состояние
+        await state.finish()
+        
+    except Exception as e:
+        logger.error(f"Error in process_generation_mode: {e}")
+        await callback_query.message.answer("❌ Произошла ошибка")
+        await state.finish()
+
+    import re
+    audio_url_match = re.search(r'https?://[^\s]+', message.text)
+    if audio_url_match:
+        audio_url = audio_url_match.group(0)
+    else:
+        await bot.send_message(user_id, "❌ Не удалось найти ссылку на аудио. Попробуйте снова.")
+        return
+    
+    # Сохраняем audio_url в состоянии
+    await state.update_data(audio_url=audio_url)
+    await ChannelPostStates.waiting_for_comment.set()
+    
+    await bot.send_message(
+        user_id, 
+        "📝 *Добавьте комментарий к вашей публикации:*\n\n" +
+        "Напишите текст, который будет отображаться вместе с вашей песней в канале. " +
+        "Например, опишите настроение, вдохновение или историю создания.", 
+        parse_mode="Markdown"
+    )
+
+# Запуск приложения
+def run_fastapi():
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("BOT_PORT", 8000)), log_level="info")
+
+def run_bot():
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    """Действия при запуске бота"""
+    logging.info("✅ Бот запущен! Запускаем мониторинг...")
+    # Запускаем мониторинг завершенных задач
+    import asyncio
+
+
+
+
+# Запуск бота
+if __name__ == '__main__':
+    import asyncio
+    # asyncio.run(main())  # Убрано - функции main() нет
+
+if __name__ == '__main__':
+    # init_db()  # SQLite больше не используется
+    import asyncio
+    # asyncio.run(db.init())  # Инициализация адаптера БД - ЗАКОММЕНТИРОВАНО
+    # init_redis()  # Инициализация Redis - ЗАКОММЕНТИРОВАНО
+    
+        # Запускаем упрощенный мониторинг в основном event loop
+    import asyncio
+    logging.info("🚀 Запуск AlBi-music Bot + Payments...")
+    import threading
+    # Запуск FastAPI в отдельном потоке
+    fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
+    fastapi_thread.start()
+    
+    # Запуск Telegram бота (правильный способ из бэкапа)
+    logging.info("🚀 Запуск AlBi-music Bot + Payments...")
+    
+    # Инициализация PostgreSQL
+    from postgres_db import init_postgres
+    import asyncio
+    
+    async def init_db():
+        await init_postgres()
+    
+    # Запускаем инициализацию в event loop
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(init_db())
+    
+    executor.start_polling(dp, skip_updates=True)
+
+
+# ========== ОБРАБОТЧИК РЕЖИМА ГЕНЕРАЦИИ ==========
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('mode_'), state='*')
+async def process_generation_mode(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора режима генерации"""
+    try:
+        await callback_query.answer()
+        
+        mode = callback_query.data.replace('mode_', '')
+        mode_name = 'Точный режим' if mode == 'exact' else 'Творческий режим'
+        
+        logger.info(f"User {callback_query.from_user.id} selected mode: {mode}")
+        
+        # Сохраняем режим в состояние
+        await state.update_data(generation_mode=mode)
+        
+        # Уведомляем пользователя
+        await callback_query.message.answer(
+            f"✅ Выбран: {mode_name}\n\n"
+            "Генерация началась, ожидайте результат..."
+        )
+        
+        # Здесь можно добавить запуск генерации
+        # Пока просто завершаем состояние
+        await state.finish()
+        
+    except Exception as e:
+        logger.error(f"Error in process_generation_mode: {e}")
+        await callback_query.message.answer("❌ Произошла ошибка")
+        await state.finish()
+

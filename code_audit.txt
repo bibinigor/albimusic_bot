@@ -1,0 +1,199 @@
+# ============================================
+# КОД ДЛЯ АУДИТА - AlBi-music Bot
+# Дата: 2026-01-09
+# Проблема: SQL синтаксическая ошибка "WHERE task_id = NULL"
+# ============================================
+
+# ========== ФАЙЛ: celery_tasks.py ==========
+# Функция save_generation_task_sync (исправленная версия):
+
+def save_generation_task_sync(user_id, task_id, prompt, status, audio_url=None):
+    """Синхронное сохранение/обновление задачи в БД (UPSERT)"""
+    logger = logging.getLogger(__name__)
+    
+    try:
+        logger.info(f"💾 save_generation_task_sync: task_id={task_id}, status={status}, audio_url={'present' if audio_url else 'None'}")
+        
+        if audio_url is not None:
+            # Если есть audio_url, обновляем существующую запись
+            logger.info(f"📝 Обновление с audio_url: task_id={task_id}")
+            if task_id is None:
+                logger.error("❌ task_id is None! Невозможно обновить запись")
+                return {"success": False, "error": "task_id is None"}
+            result = execute_query_sync(
+                """UPDATE generations 
+                SET status = %s, 
+                    audio_url = %s
+                WHERE task_id = %s
+                RETURNING id""",
+                (status, audio_url, task_id)
+            )
+            
+            if result:
+                logger.info(f"✅ Задача {task_id} обновлена в БД (status: {status})")
+                return {'success': True, 'id': result[0]}
+            else:
+                logger.warning(f"⚠️  Задача {task_id} не найдена при обновлении")
+                return {'success': False, 'error': 'Задача не найдена'}
+                
+        else:
+            # Если нет audio_url, пробуем обновить статус существующей записи
+            logger.info(f"📝 Обновление статуса: task_id={task_id}, status={status}")
+            if task_id is None:
+                logger.error("❌ task_id is None! Невозможно обновить статус")
+                return {"success": False, "error": "task_id is None"}
+            result = execute_query_sync(
+                """UPDATE generations 
+                SET status = %s
+                WHERE task_id = %s
+                RETURNING id""",
+                (status, task_id)
+            )
+            
+            if result:
+                logger.info(f"✅ Статус задачи {task_id} обновлен на '{status}'")
+                return {'success': True, 'id': result[0]}
+            else:
+                # Если запись не найдена, создаем новую
+                logger.info(f"📝 Создание новой записи: task_id={task_id}")
+                result = execute_query_sync(
+                    """INSERT INTO generations 
+                    (user_id, task_id, prompt, status, created_at) 
+                    VALUES (%s, %s, %s, %s, NOW())
+                    RETURNING id""",
+                    (user_id, task_id, prompt, status)
+                )
+                if result:
+                    logger.info(f"✅ Новая задача создана: id={result[0]}")
+                    return {'success': True, 'id': result[0]}
+                else:
+                    logger.error(f"❌ Ошибка создания новой задачи")
+                    return {'success': False, 'error': 'Не удалось создать задачу'}
+                    
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения задачи {task_id}: {e}", exc_info=True)
+        return {'success': False, 'error': f'Ошибка обновления задачи: {str(e)}'}
+
+# ========== ФУНКЦИЯ generate_song_task ==========
+# Начало функции generate_song_task:
+
+def generate_song_task(self, user_id, lyrics, style, custom_mode=False, task_id=None):
+    """Синхронная задача генерации песни с гарантированным сохранением результата"""
+    # Используем переданный task_id или генерируем свой
+    if task_id is None:
+        task_id = self.request.id
+    
+    logger.info(f"🔄 Запуск генерации песни для пользователя {user_id}, задача {task_id}")
+    
+    result_status = 'error'
+    result_message = 'Неизвестная ошибка'
+    audio_url = None
+    translated_style = None
+    
+    try:
+        # 1. ПОДГОТОВКА ДАННЫХ ДЛЯ SUNO API
+        if style:
+            translated_style = translate_style_to_english(style)
+            logger.info(f"🔄 Перевод стиля '{style}' -> '{translated_style}'")
+            prompt = lyrics  # Только текст песни
+        else:
+            prompt = lyrics  # Только текст песни если стиль не указан
+        
+        # 2. ОБНОВЛЯЕМ статус существующей задачи
+        save_success = save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=f"Стиль: {style if style else 'Не указан'}. Текст: {lyrics[:100]}...",
+            status='processing'
+        )
+        
+        if not save_success:
+            logger.error(f"❌ Не удалось обновить задачу {task_id} в БД")
+            result_message = 'Ошибка базы данных'
+            return {
+                'status': 'error',
+                'message': result_message,
+                'task_id': task_id
+            }
+
+# ========== ФУНКЦИЯ generate_music_task ==========
+# Начало функции generate_music_task:
+
+def generate_music_task(self, user_id, prompt, task_id=None):
+    """Синхронная задача генерации музыки с гарантированным сохранением результата"""
+    # Используем переданный task_id или генерируем свой
+    if task_id is None:
+        task_id = self.request.id
+    
+    logger.info(f"🔄 Запуск генерации музыки для пользователя {user_id}, задача {task_id}")
+    
+    result_status = 'error'
+    result_message = 'Неизвестная ошибка'
+    audio_url = None
+    
+    try:
+        # 1. ОБНОВЛЯЕМ статус существующей задачи
+        save_success = save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=prompt,
+            status='processing'
+        )
+        
+        if not save_success:
+            logger.error(f"❌ Не удалось обновить задачу {task_id} в БД")
+            result_message = 'Ошибка базы данных'
+            return {
+                'status': 'error',
+                'message': result_message,
+                'task_id': task_id
+            }
+
+# ========== ЛОГИ ОШИБОК ==========
+# Последние ошибки из /var/log/albimusic/celery-error.log:
+
+"""
+  File "/root/albimusic-bot/celery_tasks.py", line 537, in save_generation_task_sync
+    result = execute_query_sync(
+  File "/root/albimusic-bot/db_utils.py", line 60, in execute_query_sync
+    cursor.execute(query, params)
+psycopg2.errors.SyntaxError: syntax error at or near "WHERE"
+LINE 5:                 WHERE task_id = NULL
+                        ^
+
+2026-01-09 13:40:00,656 - celery_tasks - INFO - 📝 Результат задачи None гарантированно сохранен: error
+2026-01-09 13:40:00,658 - celery.app.trace - INFO - Task celery_tasks.generate_song_task[7557b857-2e98-4b36-a4da-5a09f6128e48] succeeded in 0.32520247250795364s: {'status': 'error', 'message': 'Генерация не удалась', 'task_id': None}
+"""
+
+# ========== ВЫЗОВ ИЗ БОТА ==========
+# Код из main_with_payments.py, строка ~452:
+
+"""
+        # Отправляем задачу в Celery
+        if is_song:
+            task = generate_song_task.delay(user_id, lyrics, style, custom_mode)
+        else:
+            task = generate_music_task.delay(user_id, f'{style}. {custom_mode}' if custom_mode else style)
+"""
+
+# ============================================
+# ВОПРОС К CLAUDE ДЛЯ АУДИТА:
+# 
+# Проблема: В логах видна SQL синтаксическая ошибка "WHERE task_id = NULL" 
+# и потом возвращается {'status': 'error', 'message': 'Генерация не удалась', 'task_id': None}
+# 
+# Что мы уже сделали:
+# 1. Исправили SQL синтаксис (убрали лишние запятые)
+# 2. Исправили INSERT запрос (убрали лишний NOW())
+# 3. Добавили проверки на task_id is None в save_generation_task_sync
+# 
+# Вопросы:
+# 1. Почему task_id становится None, если в функциях generate_song_task и generate_music_task 
+#    есть проверка: if task_id is None: task_id = self.request.id?
+# 2. Может ли self.request.id быть None в определенных условиях?
+# 3. Есть ли другие места, где task_id может перезаписываться на None?
+# 4. Правильно ли мы обрабатываем случай, когда audio_url = 'ERROR: message' (строка, а не None)?
+# 5. Что еще нужно исправить для полного решения проблемы?
+# 
+# Пожалуйста, проанализируй код и логи, и предложи конкретные исправления.
+# ============================================

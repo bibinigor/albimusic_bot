@@ -1,0 +1,106 @@
+=== PROBLEM AREA REPORT ===
+Lines 1120-1250 from main_with_payments.py
+==============================
+# Запуск бота
+
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('mode_'), state='*')
+async def process_generation_mode(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик выбора режима генерации"""
+    await callback_query.answer()
+    
+    mode = callback_query.data.replace('mode_', '')
+    user_id = str(callback_query.from_user.id)
+    
+    # Получаем данные из состояния
+    state_data = await state.get_data()
+    
+    logging.info(f"User {user_id} selected mode: {mode} for {generation_type}")
+    
+    # Сохраняем выбор
+    await state.update_data(generation_mode=mode)
+    
+    # Запускаем генерацию
+    if generation_type == 'song':
+    lyrics = state_data.get('lyrics', '')
+    style = state_data.get('style', '')
+    
+    if not lyrics:
+       await callback_query.message.answer("❌ Ошибка: текст песни не найден")
+       await state.finish()
+       return
+    
+    # Запускаем генерацию песни
+        from celery_tasks import generate_song_task
+        task = generate_song_task.delay(
+            user_id=user_id,
+            lyrics=lyrics,
+            style=style,
+            custom_mode=(mode == 'creative')
+        )
+        
+        await callback_query.message.answer(
+            f"✅ Выбран: {'Творческий' if mode == 'creative' else 'Точный'} режим\n\n"
+            "🎵 Генерация песни началась!\n"
+            "⏱ Ожидайте 2-3 минуты..."
+        )
+        
+    else:  # music
+        prompt = state_data.get('prompt', '')
+        
+        if not prompt:
+            await callback_query.message.answer("❌ Ошибка: описание музыки не найдено")
+            await state.finish()
+            return
+        
+        # Запускаем генерацию музыки
+        from celery_tasks import generate_music_task
+        task = generate_music_task.delay(
+            user_id=user_id,
+            prompt=f"{prompt}. {'творческая интерпретация' if mode == 'creative' else 'точное соответствие'}"
+        )
+        
+        await callback_query.message.answer(
+            f"✅ Выбран: {'Творческий' if mode == 'creative' else 'Точный'} режим\n\n"
+            "🎵 Генерация музыки началась!\n"
+            "⏱ Ожидайте 2-3 минуты..."
+        )
+    
+    await state.finish()
+# ========== ОБРАБОТЧИК РЕЖИМА ГЕНЕРАЦИИ ==========
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('mode_'), state='*')
+if __name__ == '__main__':
+    # init_db()  # SQLite больше не используется
+    import asyncio
+    # asyncio.run(db.init())  # Инициализация адаптера БД - ЗАКОММЕНТИРОВАНО
+    # init_redis()  # Инициализация Redis - ЗАКОММЕНТИРОВАНО
+    
+        # Запускаем упрощенный мониторинг в основном event loop
+    import asyncio
+    logging.info("🚀 Запуск AlBi-music Bot + Payments...")
+    import threading
+    # Запуск FastAPI в отдельном потоке
+    fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
+    fastapi_thread.start()
+    
+    # Запуск Telegram бота (правильный способ из бэкапа)
+    logging.info("🚀 Запуск AlBi-music Bot + Payments...")
+    
+    # Инициализация PostgreSQL
+    from postgres_db import init_postgres
+    import asyncio
+    
+    async def init_db():
+        await init_postgres()
+    
+    # Запускаем инициализацию в event loop
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(init_db())
+    
+    executor.start_polling(dp, skip_updates=True)
+
+
+==============================
+Current Python syntax check:
+Sorry: IndentationError: expected an indented block after 'if' statement on line 1141 (main_with_payments.py, line 1142)

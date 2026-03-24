@@ -1,0 +1,15 @@
+# Большие файлы
+albimusic-bot-FULLY-FIXED-20260114_105913.tar.gz
+logs/monitor.log
+
+# Общие исключения
+*.log
+*.gz
+*.tar
+__pycache__/
+*.pyc
+venv/
+celery_venv/
+.env
+# Конфиги с реальными данными
+config.py

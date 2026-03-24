@@ -1,0 +1,978 @@
+#!/usr/bin/env python3
+import time
+import json
+import logging
+from logging.handlers import RotatingFileHandler
+from celery import Celery
+import config
+from db_utils import execute_query_sync
+
+# Инициализация пула БД
+from db_utils import init_db_pool_sync
+init_db_pool_sync()
+
+import requests
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Настройка файлового логирования Celery
+celery_file_handler = RotatingFileHandler(
+    '/var/log/albimusic-bot/celery/celery.log',
+    maxBytes=10*1024*1024,  # 10 МБ
+    backupCount=5
+)
+celery_file_handler.setLevel(logging.INFO)
+celery_file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+celery_file_handler.setFormatter(celery_file_formatter)
+logging.getLogger().addHandler(celery_file_handler)
+
+# Словарь перевода русских музыкальных терминов для Suno API
+MUSIC_STYLE_TRANSLATIONS = {
+    # Жанры
+    "рок": "rock",
+    "поп": "pop",
+    "метал": "metal",
+    "хард-рок": "hard rock",
+    "хеви-метал": "heavy metal",
+    "джаз": "jazz",
+    "блюз": "blues",
+    "электрон": "electronic",
+    "хип-хоп": "hip hop",
+    "рэп": "rap",
+    "фолк": "folk",
+    "классическ": "classical",
+    "инди": "indie",
+    
+    # Инструменты
+    "гитар": "guitar",
+    "электрогитар": "electric guitar",
+    "соло": "solo",
+    "бас": "bass",
+    "бас-гитар": "bass guitar",
+    "ударн": "drums",
+    "барабан": "drum",
+    "синтезатор": "synthesizer",
+    "фортепиано": "piano",
+    "пианино": "piano",
+    "скрипка": "violin",
+    "струнн": "strings",
+    "оркестр": "orchestra",
+    "орган": "organ",
+    
+    # Вокал
+    "вокал": "vocal",
+    "мужск": "male",
+    "женск": "female",
+    "хор": "choir",
+    "голос": "voice",
+    
+    # Темп/атмосфера
+    "быстр": "fast",
+    "медлен": "slow",
+    "темп": "tempo",
+    "энергичн": "energetic",
+    "спокойн": "calm",
+    "агрессивн": "aggressive",
+    "грустн": "sad",
+    "радостн": "happy",
+    "эпичн": "epic",
+    "драйв": "driving beat",
+}
+
+def translate_style_to_english(russian_style):
+    """Переводит русский стиль в английский для лучшего понимания Suno API"""
+    if not russian_style:
+        return ""
+    
+    # Приводим к нижнему регистру для поиска
+    style_lower = russian_style.lower()
+    
+    # Проверяем есть ли русские буквы
+    has_russian = any("а" <= char <= "я" for char in style_lower)
+    
+    if not has_russian:
+        # Если нет русских букв, возвращаем как есть (уже английский)
+        return russian_style
+    
+    # Простой перевод: заменяем русские слова английскими
+    result = style_lower
+    for rus, eng in MUSIC_STYLE_TRANSLATIONS.items():
+        if rus in result:
+            result = result.replace(rus, eng)
+    
+    # Добавляем улучшения для лучшего понимания Suno
+    improvements = {
+        "electric guitar": "electric guitar solo lead, distorted rhythm guitar",
+        "bass guitar": "bass guitar, prominent bass",
+        "bass": "bass guitar",
+        "drums": "full drum kit",
+        "drum": "drum kit",
+        "male vocal": "male rock vocal, powerful voice",
+        "female vocal": "female vocal, clear voice",
+        "rock": "rock music",
+        "pop": "pop music",
+    }
+    
+    for key, value in improvements.items():
+        if key in result:
+            result = result + ", " + value
+    
+    # Убираем дубликаты и лишние запятые
+    words = [word.strip() for word in result.split(",") if word.strip()]
+    unique_words = []
+    for word in words:
+        if word not in unique_words:
+            unique_words.append(word)
+    
+    result = ", ".join(unique_words)
+    
+    # Логируем перевод
+    if russian_style != result:
+        logger.info(f"🔄 Перевод стиля: '{russian_style}' → '{result}'")
+    
+    return result
+
+# Словарь перевода русских музыкальных терминов для Suno API
+
+
+
+# Полный словарь перевода русских музыкальных терминов для Suno API
+
+
+celery_app = Celery('albimusic_tasks')
+
+# Конфигурация
+celery_app.config_from_object({
+    'broker_url': 'redis://127.0.0.1:6379/0',
+    'result_backend': 'redis://127.0.0.1:6379/2',
+    'task_serializer': 'json',
+    'accept_content': ['json'],
+    'result_serializer': 'json',
+    'timezone': 'Europe/Moscow',
+    'enable_utc': True,
+    'task_track_started': True,
+    'task_send_sent_event': True,
+    'broker_connection_retry_on_startup': True,
+})
+
+logger.info("="*60)
+logger.info(f"✅ Celery app created: {celery_app.main}")
+logger.info(f"   • Broker: {celery_app.conf.broker_url}")
+logger.info(f"   • Backend: {celery_app.conf.result_backend}")
+logger.info("="*60)
+celery_app.conf.update(
+    broker_url='redis://localhost:6379/0',
+    broker_connection_retry_on_startup=True,
+    task_serializer='json',
+    accept_content=['json'], 
+    result_serializer='json',
+    timezone='Europe/Moscow',
+    enable_utc=True,
+    result_backend='redis://localhost:6379/2',
+    task_ignore_result=False,
+    worker_hijack_root_logger=False,
+    worker_send_task_events=True,
+    task_send_sent_event=True,
+)
+
+
+def validate_audio_url(url, request_id):
+    """
+    Проверка доступности и валидности MP3 файла
+    
+    Args:
+        url (str): URL MP3 файла
+        request_id (str): ID запроса для логирования
+    
+    Returns:
+        bool: True если файл доступен и валиден
+    """
+    import requests
+    
+    try:
+        logger.info(f"[{request_id}] 🔍 Проверка доступности MP3: {url[:60]}...")
+        
+        # HEAD запрос для проверки без скачивания
+        head_response = requests.head(url, timeout=15, allow_redirects=True)
+        
+        if head_response.status_code != 200:
+            logger.error(f"[{request_id}] ❌ MP3 недоступен: HTTP {head_response.status_code}")
+            return False
+        
+        # Проверка Content-Type
+        content_type = head_response.headers.get('Content-Type', '').lower()
+        if 'audio' not in content_type and 'octet-stream' not in content_type:
+            logger.warning(f"[{request_id}] ⚠️ Неожиданный Content-Type: {content_type}")
+        
+        # Проверка размера
+        content_length = int(head_response.headers.get('Content-Length', 0))
+        if content_length < 1000:
+            logger.error(f"[{request_id}] ❌ MP3 слишком маленький: {content_length} байт")
+            return False
+        
+        logger.info(f"[{request_id}] ✅ MP3 валиден: {content_length:,} байт")
+        
+        # Проверка magic bytes
+        try:
+            partial_response = requests.get(url, headers={'Range': 'bytes=0-2047'}, timeout=10)
+            if partial_response.status_code in (200, 206):
+                magic_bytes = partial_response.content[:3]
+                is_id3 = (magic_bytes[:3] == b'ID3')
+                is_mpeg = (magic_bytes[0] == 0xFF and (magic_bytes[1] & 0xE0) == 0xE0)
+                
+                if is_id3 or is_mpeg:
+                    logger.info(f"[{request_id}] ✅ MP3 формат подтвержден")
+        except Exception:
+            pass  # Не критично
+        
+        return True
+    
+    except requests.exceptions.Timeout:
+        logger.error(f"[{request_id}] ⏱️ Таймаут при проверке MP3")
+        return False
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ Ошибка проверки MP3: {e}")
+        return False
+
+
+def format_style_for_suno(style):
+    """
+    Форматирует стиль для Suno API (перевод + обертка в [])
+    
+    ПРОБЛЕМА: Suno API интерпретирует стиль без [] как часть лирики
+    
+    РЕШЕНИЕ: 
+    1. Переводим стиль на английский
+    2. Оборачиваем в [квадратные скобки] для разделения
+       метаданных (Chirp) и лирики (Bark)
+    
+    Args:
+        style (str): Стиль музыки (на русском или английском)
+    
+    Returns:
+        str: Отформатированный стиль для Suno API
+    
+    Примеры:
+        "рок" → "rock"
+        "рэп, хип хоп" → "[rap, hip hop]"
+        "классическая музыка" → "[classical music]"
+        "rock" → "rock"
+        "hard rock" → "[hard rock]"
+    
+    Правила обертки:
+        1. Если есть запятая → оборачиваем в []
+        2. Если несколько слов → оборачиваем в []
+        3. Если уже в [] → не трогаем
+        4. Простое одно слово → без скобок
+    """
+    
+    if not style:
+        return ""
+    
+    # Запоминаем оригинальный стиль для логирования
+    original_style = style.strip()
+    
+    # ═══════════════════════════════════════════════════════════════
+    # ШАГ 1: ПЕРЕВОД НА АНГЛИЙСКИЙ
+    # ═══════════════════════════════════════════════════════════════
+    
+    translated_style = translate_style_to_english(original_style)
+    
+    # Логируем перевод (только если изменился)
+    if translated_style != original_style:
+        logger.info(f"[Suno] 🔄 Стиль переведен: '{original_style}' → '{translated_style}'")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # ШАГ 2: ФОРМАТИРОВАНИЕ (ОБЕРТКА В [])
+    # ═══════════════════════════════════════════════════════════════
+    
+    style = translated_style.strip()
+    
+    # Уже обернут в []?
+    if style.startswith('[') and style.endswith(']'):
+        logger.info(f"[Suno] ℹ️  Стиль уже в []: '{style}'")
+        return style
+    
+    # Определяем нужны ли скобки
+    needs_brackets = (
+        ',' in style or                                          # Есть запятые
+        len(style.split()) > 1 or                                # Несколько слов
+        any(char in style for char in ['(', ')', '{', '}'])      # Спецсимволы
+    )
+    
+    if needs_brackets:
+        formatted_style = f"[{style}]"
+        logger.info(f"[Suno] 📦 Стиль обернут в []: '{style}' → '{formatted_style}'")
+        return formatted_style
+    
+    # Простой стиль - без изменений
+    logger.info(f"[Suno] ✅ Стиль без изменений: '{style}'")
+    return style
+
+def generate_suno_music_sync(prompt, is_song=False, custom_mode=False, user_id=None, style=None):
+    """Синхронная версия генерации музыки через Suno API с расширенным логированием"""
+    
+    import uuid
+    import time
+    request_id = str(uuid.uuid4())[:8]  # Короткий уникальный ID
+    start_time = time.time()
+    
+    logger.info(f"╔═══════════════════════════════════════════════════════════╗")
+    logger.info(f"║  SUNO API REQUEST | ID: {request_id} | User: {user_id}    ")
+    logger.info(f"╚═══════════════════════════════════════════════════════════╝")
+    
+    # ОТЛАДКА: Логируем что пришло на вход
+    logger.info(f"[{request_id}] 📝 INPUT PARAMETERS:")
+    logger.info(f"[{request_id}]    • Prompt: {prompt[:100]}..." if len(prompt) > 100 else f"[{request_id}]    • Prompt: {prompt}")
+    logger.info(f"[{request_id}]    • Style: {style}")
+    logger.info(f"[{request_id}]    • Custom mode: {custom_mode}")
+    logger.info(f"[{request_id}]    • Is song: {is_song}")
+    logger.info(f"[{request_id}]    • User ID: {user_id}")
+    
+
+    # 🔄 ПЕРЕВОД СТИЛЯ НА АНГЛИЙСКИЙ
+    if style:
+        original_style = style
+        style = translate_style_to_english(style)
+        if style != original_style:
+            logger.info(f"[{request_id}] 🔄 СТИЛЬ ПЕРЕВЕДЕН: '{original_style}' → '{style}'")
+
+    headers = {
+        "Authorization": f"Bearer {config.SUNO_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+
+    if is_song:
+        # Определяем пол вокала из стиля
+        vocal_gender = "m"  # по умолчанию мужской
+        if style and ("female" in style.lower() or "женск" in style.lower()):
+            vocal_gender = "f"
+        elif style and ("male" in style.lower() or "мужск" in style.lower()):
+            vocal_gender = "m"
+        
+        if custom_mode:
+            data = {
+                "prompt": prompt,  # ТОЛЬКО текст песни
+                "style": format_style_for_suno(style) if style else "",  # ТОЛЬКО стиль
+                "customMode": True,
+                "instrumental": False,
+                "styleWeight": 0.9,
+                "vocalsGender": vocal_gender,
+                "model": "V5",
+                "callBackUrl": "https://httpbin.org/status/200"
+            }
+        else:
+            data = {
+                "prompt": prompt,  # ТОЛЬКО текст песни
+                "style": format_style_for_suno(style) if style else "",  # ТОЛЬКО стиль
+                "customMode": False,
+                "instrumental": False,
+                "styleWeight": 0.8,
+                "vocalsGender": vocal_gender,
+                "model": "V5",
+                "callBackUrl": "https://httpbin.org/status/200"
+            }
+    else:
+        data = {
+            "prompt": prompt,  # ТОЛЬКО описание музыки
+            "style": format_style_for_suno(style) if style else "",  # ТОЛЬКО стиль
+            "customMode": False,
+            "instrumental": True,
+            "styleWeight": 0.8,
+            "callBackUrl": "https://httpbin.org/status/200",
+            "model": "V5"
+        }
+    
+    # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ДАННЫХ
+    logger.info(f"[{request_id}] 📤 REQUEST DATA TO SUNO API:")
+    safe_data = data.copy()
+    if 'Authorization' in headers:
+        safe_headers = headers.copy()
+        safe_headers['Authorization'] = 'Bearer ***HIDDEN***'
+        logger.info(f"[{request_id}]    • Headers: {safe_headers}")
+    logger.info(f"[{request_id}]    • Data: {json.dumps(safe_data, ensure_ascii=False)}")
+    
+    try:
+        # Создаем задачу генерации
+        api_start = time.time()
+        response = requests.post(f"{config.SUNO_API_URL}/api/v1/generate", json=data, headers=headers, timeout=300)
+        api_duration = time.time() - api_start
+        
+        logger.info(f"[{request_id}] 📥 SUNO API RESPONSE:")
+        logger.info(f"[{request_id}]    • Status code: {response.status_code}")
+        logger.info(f"[{request_id}]    • Response time: {api_duration:.2f}s")
+        logger.info(f"[{request_id}]    • Response size: {len(response.content)} bytes")
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"[{request_id}] ✅ SUNO API SUCCESS:")
+            logger.info(f"[{request_id}]    • Result keys: {list(result.keys())}")
+            
+            # === ИСПРАВЛЕНИЕ 1: БЕЗОПАСНЫЙ ПАРСИНГ ===
+            if 'data' not in result:
+                logger.error(f"[{request_id}] ❌ ОШИБКА: Нет ключа 'data' в ответе!")
+                logger.error(f"[{request_id}]    • Полный ответ: {result}")
+                return None
+            
+            data_obj = result.get('data')
+            
+            # Проверяем что data не None
+            if data_obj is None:
+                logger.error(f"[{request_id}] ❌ ОШИБКА: result['data'] равен None!")
+                logger.error(f"[{request_id}]    • code: {result.get('code')}")
+                logger.error(f"[{request_id}]    • msg: {result.get('msg')}")
+                return None
+            
+            # Проверяем что data - это словарь
+            if not isinstance(data_obj, dict):
+                logger.error(f"[{request_id}] ❌ ОШИБКА: result['data'] не является словарем!")
+                logger.error(f"[{request_id}]    • Тип: {type(data_obj)}")
+                logger.error(f"[{request_id}]    • Значение: {data_obj}")
+                return None
+            
+            logger.info(f"[{request_id}]    • Data keys: {list(data_obj.keys())}")
+            
+            # Извлекаем taskId
+            task_id = data_obj.get('taskId')
+            
+            if not task_id:
+                logger.error(f"[{request_id}] ❌ ОШИБКА: Нет taskId в data!")
+                logger.error(f"[{request_id}]    • Data: {data_obj}")
+                return None
+            
+            logger.info(f"[{request_id}] 🎵 SUNO TASK CREATED:")
+            logger.info(f"[{request_id}]    • Task ID: {task_id}")
+            
+            # Ожидаем завершения генерации
+            for i in range(90):  # 90 попыток по 10 секунд = 15 минут
+                time.sleep(10)
+                status_response = requests.get(f"{config.SUNO_API_URL}/api/v1/generate/record-info?taskId={task_id}", headers=headers, timeout=60)
+                status_duration = time.time() - api_start - api_duration - (i * 10)
+                
+                if status_response.status_code == 200:
+                    status_result = status_response.json()
+                    status = status_result.get('data', {}).get('status')
+                    
+                    logger.info(f"[{request_id}] 📊 TASK STATUS #{i+1}:")
+                    logger.info(f"[{request_id}]    • Status: {status}")
+                    logger.info(f"[{request_id}]    • Total wait time: {(i+1)*10}s")
+                    
+                    if status == 'SUCCESS':
+                        audio_data = status_result.get('data', {}).get('response', {}).get('sunoData', [])
+                        if audio_data:
+            # Получаем ВСЕ ссылки из массива sunoData
+            audio_urls = []
+            for item in audio_data:
+                url = item.get('audioUrl')
+                if url:
+                    audio_urls.append(url)
+            
+            if not audio_urls:
+                logger.error(f"[{request_id}] ❌ Нет валидных audio URL в ответе")
+                return None
+            
+            logger.info(f"[{request_id}] ✅ SUNO GENERATION COMPLETED:")
+            logger.info(f"[{request_id}]    • Получено {len(audio_urls)} аудио-ссылок")
+            
+            # Валидация каждой ссылки
+            for idx, url in enumerate(audio_urls, 1):
+                logger.info(f"[{request_id}]    • Версия {idx}: {url}")
+                if not validate_audio_url(url, request_id):
+                    logger.error(f"[{request_id}] ❌ Версия {idx} не прошла валидацию")
+                    return None
+            
+            # Возвращаем JSON массив
+            audio_url = json.dumps(audio_urls, ensure_ascii=False)
+            logger.info(f"[{request_id}]    • Сохраняем как JSON: {audio_url}")
+                                        return audio_url
+                    elif status == 'ERROR':
+                        error_msg = status_result.get('data', {}).get('response', {}).get('error', 'Unknown error')
+                        logger.error(f"[{request_id}] ❌ SUNO GENERATION ERROR:")
+                        logger.error(f"[{request_id}]    • Error: {error_msg}")
+                        logger.error(f"[{request_id}]    • Full response: {json.dumps(status_result, ensure_ascii=False)}")
+                        return None
+                    elif i > 30 and status == "PENDING":
+                        logger.warning(f"[{request_id}] ⚠️ SUNO API SLOW:")
+                        logger.warning(f"[{request_id}]    • Task {task_id} still PENDING after {(i+1)*10} seconds")
+                else:
+                    logger.warning(f"[{request_id}] ⚠️ STATUS CHECK FAILED:")
+                    logger.warning(f"[{request_id}]    • Status code: {status_response.status_code}")
+                    logger.warning(f"[{request_id}]    • Response: {status_response.text[:500]}")
+            
+            logger.error(f"[{request_id}] ⏰ SUNO TIMEOUT:")
+            logger.error(f"[{request_id}]    • Task {task_id} timed out after 900 seconds")
+            return None
+        else:
+            logger.error(f"[{request_id}] ❌ SUNO API ERROR:")
+            logger.error(f"[{request_id}]    • Status: {response.status_code}")
+            logger.error(f"[{request_id}]    • Response: {response.text[:1000]}")
+            return None
+            
+    except requests.exceptions.Timeout as e:
+        logger.error(f"[{request_id}] ⏱️ SUNO REQUEST TIMEOUT:")
+        logger.error(f"[{request_id}]    • Error: {str(e)}")
+        logger.error(f"[{request_id}]    • Duration: {time.time() - start_time:.2f}s")
+        return None
+        
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[{request_id}] 🔌 SUNO CONNECTION ERROR:")
+        logger.error(f"[{request_id}]    • Error: {str(e)}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ UNEXPECTED SUNO ERROR:")
+        logger.error(f"[{request_id}]    • Type: {type(e).__name__}")
+        logger.error(f"[{request_id}]    • Error: {str(e)}")
+        return None
+
+def save_generation_task_sync(user_id, task_id, prompt, status, audio_url=None, 
+                              suno_task_id=None, result_message=None, error_message=None):
+    """
+    Синхронное сохранение/обновление задачи генерации в PostgreSQL
+    
+    Args:
+        user_id (int): ID пользователя Telegram
+        task_id (str): ID Celery задачи (уникальный!)
+        prompt (str): Текст промпта
+        status (str): pending | processing | completed | error
+        audio_url (str, optional): URL MP3 файла
+        suno_task_id (str, optional): ID задачи в Suno API
+        result_message (str, optional): Сообщение о результате
+        error_message (str, optional): Сообщение об ошибке
+    
+    Returns:
+        bool: True при успехе
+    
+    ВАЖНО:
+    - Использует UPSERT через ON CONFLICT (task_id)
+    - task_id имеет UNIQUE constraint (добавлен миграцией)
+    - НЕ пробрасывает исключения
+    """
+    
+    try:
+        # ===============================================
+        # ВАЛИДАЦИЯ И ПОДГОТОВКА ДАННЫХ
+        # ===============================================
+        
+        # Обязательные параметры
+        if not user_id or not task_id:
+            logger.error(f"❌ [DB] Отсутствуют обязательные параметры: user_id={user_id}, task_id={task_id}")
+            return False
+        
+        # Ограничиваем длину строк
+        safe_prompt = (prompt[:1000] if prompt else '').strip()
+        safe_audio_url = (audio_url[:500] if audio_url else '').strip()
+        safe_suno_task_id = (suno_task_id[:100] if suno_task_id else '').strip()
+        safe_result_message = (result_message[:500] if result_message else '').strip()
+        safe_error_message = (error_message[:1000] if error_message else '').strip()
+        
+        # Валидация статуса
+        valid_statuses = ['pending', 'processing', 'completed', 'error']
+        if status not in valid_statuses:
+            logger.warning(f"⚠️ [DB] Неизвестный статус '{status}', заменяем на 'error'")
+            status = 'error'
+            if not safe_error_message:
+                safe_error_message = f"Неизвестный статус: {status}"
+        
+        # ===============================================
+        # SQL UPSERT (INSERT ... ON CONFLICT UPDATE)
+        # ===============================================
+        
+        query = """
+            INSERT INTO generations 
+                (user_id, task_id, prompt, status, audio_url, suno_task_id, 
+                 result_message, error_message, created_at, updated_at)
+            VALUES 
+                (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+            ON CONFLICT (task_id) 
+            DO UPDATE SET
+                status = EXCLUDED.status,
+                audio_url = EXCLUDED.audio_url,
+                suno_task_id = EXCLUDED.suno_task_id,
+                result_message = EXCLUDED.result_message,
+                error_message = EXCLUDED.error_message,
+                updated_at = NOW()
+        WHERE generations.status NOT IN ('completed', 'error')
+            RETURNING id, created_at, updated_at
+        """
+        
+        params = (
+            user_id,
+            task_id,
+            safe_prompt,
+            status,
+            safe_audio_url,
+            safe_suno_task_id,
+            safe_result_message,
+            safe_error_message
+        )
+        
+        # ===============================================
+        # ВЫПОЛНЕНИЕ ЗАПРОСА
+        # ===============================================
+        
+        result = execute_query_sync(query, params)
+        
+        if result and len(result) > 0:
+            row_id = result[0][0] if (isinstance(result[0], (tuple, list)) and len(result[0]) > 0) else (result[0] if isinstance(result[0], int) else 'unknown')
+            created = result[0][1] if len(result[0]) > 1 else None
+            updated = result[0][2] if len(result[0]) > 2 else None
+            
+            # Определяем, INSERT или UPDATE
+            is_new = (created == updated) if (created and updated) else True
+            action = "создана" if is_new else "обновлена"
+            
+            logger.info(f"✅ [DB] Задача {task_id} {action} (id={row_id}, status={status})")
+            
+            # Дополнительное логирование
+            if status == 'completed' and safe_result_message:
+                logger.info(f"✅ [DB] Результат: {safe_result_message}")
+            elif status == 'error' and safe_error_message:
+                logger.error(f"❌ [DB] Ошибка: {safe_error_message}")
+            
+            return True
+        else:
+            logger.warning(f"⚠️ [DB] Задача {task_id} сохранена, но RETURNING не вернул данные")
+            return True
+        
+    except Exception as e:
+        # ===============================================
+        # ОБРАБОТКА ОШИБОК
+        # ===============================================
+        
+        logger.error(f"❌ [DB] Ошибка сохранения задачи {task_id}: {e}", exc_info=True)
+        logger.error(f"❌ [DB] Параметры: user_id={user_id}, status={status}, prompt={safe_prompt[:50]}...")
+        
+        # Проверяем специфические ошибки PostgreSQL
+        error_str = str(e).lower()
+        if 'unique constraint' in error_str or 'duplicate key' in error_str:
+            logger.error(f"❌ [DB] ДУБЛИКАТ task_id: {task_id} (возможна race condition)")
+        elif 'no unique or exclusion constraint' in error_str:
+            logger.error(f"❌ [DB] ОТСУТСТВУЕТ UNIQUE constraint на task_id (запустите миграцию!)")
+        
+        return False
+
+
+@celery_app.task(bind=True, name='generate_song_task')
+def generate_song_task(self, user_id, lyrics, style, custom_mode=False, task_id=None):
+    """
+    Celery задача генерации песни через Suno API
+    
+    ВАЖНО: НЕ используем finally - он выполняется ВСЕГДА
+    """
+    
+    # Если task_id не передан, используем ID самой Celery задачи
+    if not task_id:
+        task_id = self.request.id
+    
+    logger.info(f"🎤 Начало генерации ПЕСНИ для пользователя {user_id} (task_id: {task_id})")
+    
+    # Инициализация переменных
+    audio_url = None
+    result_status = 'processing'  # ✅ Начальный статус
+    result_message = 'Генерация начата'
+    
+    try:
+        # 1. СОХРАНЯЕМ ЗАДАЧУ КАК 'processing' (НЕ 'pending'!)
+        save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=f"{lyrics[:100]}...",
+            status='processing',  # ✅ Явно указываем статус
+            audio_url=None
+        )
+        
+        # 2. ГЕНЕРАЦИЯ (БЛОКИРУЮЩАЯ, ДО 15 МИНУТ)
+        logger.info(f"📡 Отправка запроса в Suno API...")
+        
+        # Формируем промпт БЕЗ стиля (стиль передается отдельно в generate_suno_music_sync)
+        if custom_mode:
+            prompt = f"{lyrics}\
+\n[Song length: 3 minutes]"
+        else:
+            prompt = lyrics
+        
+        audio_url = generate_suno_music_sync(
+            prompt=prompt,
+            is_song=True,
+            custom_mode=custom_mode,
+            user_id=user_id)
+        
+        # 3. ПРОВЕРКА РЕЗУЛЬТАТА
+        if not audio_url:
+            logger.error(f"❌ Suno API вернул пустой результат для {user_id}")
+            result_status = 'error'
+            result_message = 'Генерация не удалась (пустой результат)'
+        else:
+            logger.info(f"✅ Генерация завершена успешно для {user_id}: {audio_url}")
+            result_status = 'completed'  # ✅ ТОЛЬКО здесь!
+            result_message = 'Генерация успешна'
+        
+        # 4. СОХРАНЕНИЕ ФИНАЛЬНОГО РЕЗУЛЬТАТА
+        save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=f"Стиль: {style if style else 'Не указан'}. Текст: {lyrics[:100]}...",
+            status=result_status,
+            audio_url=audio_url,
+            result_message=result_message
+        )
+        
+        logger.info(f"✅ Задача {task_id} завершена со статусом: {result_status}")
+        
+        return {
+            'status': result_status,
+            'audio_url': audio_url,
+            'message': result_message,
+            'task_id': task_id
+        }
+        
+    except Exception as e:
+        # ❌ ОБРАБОТКА ИСКЛЮЧЕНИЙ
+        logger.error(f"❌ Критическая ошибка в generate_song_task для {user_id}: {e}", exc_info=True)
+        
+        error_message = str(e)[:500]  # Ограничиваем длину
+        
+        try:
+            # Пытаемся сохранить ошибку в БД
+            save_generation_task_sync(
+                user_id=user_id,
+                task_id=task_id,
+                prompt=f"Стиль: {style if style else 'Не указан'}. Текст: {lyrics[:100]}...",
+                status='error',
+                audio_url=None,
+                result_message=f"Ошибка: {error_message}"
+            )
+        except Exception as db_error:
+            logger.error(f"❌ Не удалось сохранить ошибку в БД: {db_error}")
+        
+        # Повторно пробрасываем исключение для Celery
+        raise
+
+# ====================================================================
+# CELERY ЗАДАЧА: ГЕНЕРАЦИЯ ИНСТРУМЕНТАЛЬНОЙ МУЗЫКИ
+# ====================================================================
+
+@celery_app.task(bind=True, name='generate_music_task')
+def generate_music_task(self, user_id, prompt, task_id=None):
+    """
+    Celery задача для генерации ИНСТРУМЕНТАЛЬНОЙ музыки через Suno API
+    
+    Args:
+        user_id (int): ID пользователя Telegram
+        prompt (str): Описание стиля музыки
+        task_id (str, optional): ID задачи (если не передан, используется self.request.id)
+    
+    Returns:
+        dict: Результат генерации
+    
+    ВАЖНО:
+    - НЕ использует finally блок (проблема преждевременного completed)
+    - Статус 'processing' → ожидание 15 минут → 'completed' или 'error'
+    - Явная обработка исключений
+    """
+    
+    # Если task_id не передан, используем ID Celery задачи
+    if not task_id:
+        task_id = self.request.id
+    
+    logger.info(f"🎵 [MUSIC] Начало генерации инструментальной музыки для пользователя {user_id}")
+    logger.info(f"🎵 [MUSIC] Task ID: {task_id}")
+    logger.info(f"🎵 [MUSIC] Prompt: {prompt[:100]}...")
+    
+    # Инициализация переменных
+    audio_url = None
+    result_status = 'processing'
+    result_message = 'Генерация начата'
+    
+    # Таймеры для мониторинга
+    import time
+    task_start = time.time()
+    
+    try:
+        # ==========================================
+        # 1. СОХРАНЕНИЕ ЗАДАЧИ СО СТАТУСОМ 'processing'
+        # ==========================================
+        logger.info(f"💾 [MUSIC] Сохранение задачи в БД (status=processing)...")
+        
+        save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=f"Инструментальная музыка: {prompt[:200]}",
+            status='processing',
+            audio_url=None
+        )
+        
+        logger.info(f"✅ [MUSIC] Задача сохранена в БД")
+        
+        # ==========================================
+        # 2. ВЫЗОВ SUNO API (БЛОКИРУЮЩИЙ, ДО 15 МИНУТ)
+        # ==========================================
+        logger.info(f"📡 [MUSIC] Отправка запроса в Suno API...")
+        logger.info(f"📡 [MUSIC] Параметры: is_song=False, custom_mode=False")
+        
+        api_start = time.time()
+        
+        audio_url = generate_suno_music_sync(
+            prompt=prompt,
+            is_song=False,  # ✅ ИНСТРУМЕНТАЛЬНАЯ музыка
+            custom_mode=False,
+            user_id=user_id)
+        
+        api_duration = time.time() - api_start
+        logger.info(f"⏱️ [MUSIC] Suno API ответил за {api_duration:.1f} сек")
+        
+        # ==========================================
+        # 3. ПРОВЕРКА РЕЗУЛЬТАТА
+        # ==========================================
+        if not audio_url:
+            logger.error(f"❌ [MUSIC] Suno API вернул пустой результат")
+            result_status = 'error'
+            result_message = 'Генерация не удалась (пустой результат от Suno API)'
+        else:
+            logger.info(f"✅ [MUSIC] Генерация успешна!")
+            logger.info(f"✅ [MUSIC] Audio URL: {audio_url}")
+            result_status = 'completed'  # ✅ ТОЛЬКО здесь статус меняется на completed!
+            result_message = 'Генерация успешна'
+        
+        # ==========================================
+        # 4. СОХРАНЕНИЕ ФИНАЛЬНОГО РЕЗУЛЬТАТА
+        # ==========================================
+        logger.info(f"💾 [MUSIC] Обновление задачи в БД (status={result_status})...")
+        
+        save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=f"Инструментальная музыка: {prompt[:200]}",
+            status=result_status,
+            audio_url=audio_url,
+            result_message=result_message
+        )
+        
+        total_duration = time.time() - task_start
+        logger.info(f"✅ [MUSIC] Задача {task_id} завершена за {total_duration:.1f} сек")
+        logger.info(f"✅ [MUSIC] Финальный статус: {result_status}")
+        
+        # ==========================================
+        # 5. ВОЗВРАТ РЕЗУЛЬТАТА
+        # ==========================================
+        return {
+            'status': result_status,
+            'audio_url': audio_url,
+            'message': result_message,
+            'task_id': task_id,
+            'duration': total_duration
+        }
+        
+    except Exception as e:
+        # ==========================================
+        # ❌ ОБРАБОТКА ИСКЛЮЧЕНИЙ
+        # ==========================================
+        logger.error(f"❌ [MUSIC] Критическая ошибка в generate_music_task: {e}", exc_info=True)
+        
+        error_message = str(e)[:500]  # Ограничиваем длину
+        error_duration = time.time() - task_start
+        
+        logger.error(f"❌ [MUSIC] Задача провалилась за {error_duration:.1f} сек")
+        
+        try:
+            # Пытаемся сохранить ошибку в БД
+            logger.info(f"💾 [MUSIC] Сохранение ошибки в БД...")
+            
+            save_generation_task_sync(
+                user_id=user_id,
+                task_id=task_id,
+                prompt=f"Инструментальная музыка: {prompt[:200]}",
+                status='error',
+                audio_url=None,
+                result_message=f"Ошибка: {error_message}"
+            )
+            
+            logger.info(f"✅ [MUSIC] Ошибка сохранена в БД")
+            
+        except Exception as db_error:
+            logger.error(f"❌ [MUSIC] Не удалось сохранить ошибку в БД: {db_error}")
+        
+        # Повторно пробрасываем исключение для Celery
+        raise
+
+
+
+@celery_app.task(name='celery_tasks.test_task')
+def test_task():
+    """Тестовая задача"""
+    logger.info("✅ Тестовая задача выполнена")
+    return {'status': 'success', 'message': 'Test task completed'}
+
+
+# ═══════════════════════════════════════════════════════════════
+# CELERY SIGNALS: ИНИЦИАЛИЗАЦИЯ БД В WORKERS
+# Автоматическая настройка пула соединений при запуске/остановке
+# ═══════════════════════════════════════════════════════════════
+
+from celery.signals import worker_process_init, worker_process_shutdown
+import logging
+import json
+
+logger = logging.getLogger(__name__)
+
+
+@worker_process_init.connect
+def init_worker_db_pool(**kwargs):
+    """
+    Инициализация пула БД при запуске worker процесса.
+    Вызывается автоматически Celery при старте каждого worker процесса.
+    """
+    logger.info("🚀 [WORKER INIT] Initializing database connection pool...")
+
+    try:
+        from db_utils import initialize_pool_for_worker
+        initialize_pool_for_worker()
+        logger.info("✅ [WORKER INIT] Database pool initialized successfully")
+    except ImportError as e:
+        logger.warning(f"⚠️  [WORKER INIT] Function not found: {e}")
+        logger.info("   Using default connection mechanism")
+    except Exception as e:
+        logger.error(f"❌ [WORKER INIT] Failed to initialize DB pool: {e}")
+        raise
+
+
+@worker_process_shutdown.connect
+def shutdown_worker_db_pool(**kwargs):
+    """
+    Закрытие пула БД при остановке worker процесса.
+    Вызывается автоматически Celery при завершении worker процесса.
+    """
+    logger.info("🔒 [WORKER SHUTDOWN] Closing database connection pool...")
+
+    try:
+        from db_utils import shutdown_pool_for_worker
+        shutdown_pool_for_worker()
+        logger.info("✅ [WORKER SHUTDOWN] Database pool closed successfully")
+    except ImportError as e:
+        logger.warning(f"⚠️  [WORKER SHUTDOWN] Function not found: {e}")
+    except Exception as e:
+        logger.error(f"❌ [WORKER SHUTDOWN] Failed to close DB pool: {e}")
+
+
+@worker_process_init.connect
+def log_worker_ready(**kwargs):
+    """Логирование готовности worker к обработке задач"""
+    logger.info("✅ [WORKER] Ready to process tasks")
+
+# ═══════════════════════════════════════════════════════════════
+# КОНЕЦ SIGNALS
+# ═══════════════════════════════════════════════════════════════
+
+@celery_app.task(name='celery_tasks.simple_test')
+def simple_test(x, y):
+    """Простейшая задача для теста"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"✅ SIMPLE TEST EXECUTED: {x} + {y} = {x+y}")
+    return x + y

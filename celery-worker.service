@@ -1,0 +1,15 @@
+[Unit]
+Description=Celery Worker Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/albimusic-bot
+Environment=PYTHONPATH=/root/albimusic-bot
+ExecStart=/usr/local/bin/celery -A celery_tasks worker -Q generation --loglevel=INFO
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

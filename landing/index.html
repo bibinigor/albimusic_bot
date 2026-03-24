@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ALBI Music - Ваш AI-композитор</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800&family=Open+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Главный экран -->
+    <main class="hero">
+        <div class="container">
+            <h1 class="logo">ALBI <span>Music</span></h1>
+            <p class="slogan">Музыка будущего — в один клик.</p>
+            <p class="sub-slogan">Идеальный саундтрек для вашего проекта. За 60 секунд.</p>
+
+            <div class="description">
+                <p><strong>ALBI Music</strong> — это ваш личный композитор на основе нейросети SUNO. Создавайте уникальную музыку и песни со словами для любых целей, экономя время и бюджет.</p>
+                <div class="highlight">
+                    <p><strong>Первая генерация — бесплатно!</strong> Почувствуйте мощь SUNO AI.</p>
+                </div>
+            </div>
+
+            <!-- Главная кнопка -->
+            <div class="main-cta">
+                <a href="https://t.me/AlBimusic_bot" class="cta-button" target="_blank">
+                    <i class="fas fa-magic"></i> Создать свой трек бесплатно
+                </a>
+                <p class="cta-note">Нажмите, чтобы перейти в бота @AlBimusicBot и начать творить.</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Демо-секция с темами -->
+    <section class="demo">
+        <div class="container">
+            <h2>Послушайте, на что способен ALBI:</h2>
+            <div class="themes-grid" id="themesContainer">
+                <!-- 9 тем будут вставлены здесь скриптом -->
+            </div>
+        </div>
+    </section>
+
+    <!-- Финальный призыв -->
+    <section class="final-cta">
+        <div class="container">
+            <h2>Хватит искать музыку — создавай свою.</h2>
+            <p>Без ограничений и лишних проблем! Только ваша идея и безграничные возможности AI.</p>
+            <a href="https://t.me/AlBimusic_bot" class="cta-button secondary" target="_blank">
+                <i class="fab fa-telegram"></i> Перейти в бота и начать
+            </a>
+        </div>
+    </section>
+
+    <!-- Подвал -->
+    <footer>
+        <div class="container">
+            <p><strong>ALBI Music Bot</strong> — ваш AI-композитор в Telegram.</p>
+            <p>Вопросы и поддержка: <a href="https://t.me/+1m8fXwzlRc5iYmMy" target="_blank">Telegram-чат</a></p>
+            <p class="footer-note">Первая генерация с использованием SUNO AI — бесплатна.</p>
+        </div>
+    </footer>
+
+    <!-- Аудиоплеер (скрыт) -->
+    <audio id="globalAudioPlayer" controls style="display: none;"></audio>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
+    <!-- Декоративные угловые изображения -->
+    <img src="/img/11.jpeg" alt="AI Core" class="corner-image corner-left">
+    <img src="/img/12.jpeg" alt="Music Magic" class="corner-image corner-right">

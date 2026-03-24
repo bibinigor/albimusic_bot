@@ -1,0 +1,83 @@
+import os
+
+# Бот Telegram - из переменных окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8078747945:AAELaCEzbPUdwwilFBy_TJi9LsBb5scyzVU')
+
+# Suno API - из переменных окружения
+SUNO_API_KEY = os.getenv('SUNO_API_KEY', '615290cfecdf58e6251835ba7971ab65')
+SUNO_API_URL = os.getenv('SUNO_API_URL', 'https://api.sunoapi.org')
+
+# Канал - можно оставить в коде (не секрет)
+CHANNEL_USERNAME = '@ALBImusic_Chart'
+
+# ЮKassa - из переменных окружения
+YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID', "1208840")
+YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY', 'live_706Kz88KIYBby24ajXDegpCmJfyfL-yLoj_Gu_6cimY')
+
+# ЮMoney (заглушки)
+YUKASSA_SHOP_ID = os.getenv('YUKASSA_SHOP_ID', 'YOUR_SHOP_ID')
+YUKASSA_API_KEY = os.getenv('YUKASSA_API_KEY', 'YOUR_API_KEY')
+
+# Логирование
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+# ЮMoney - из переменных окружения
+YOOMONEY_CLIENT_ID = os.getenv('YOOMONEY_CLIENT_ID', "E3FB4C6C97446F109C6FFDC6748C6C565FC663758477BFC63CB43182F336B060")
+YOOMONEY_CLIENT_SECRET = os.getenv('YOOMONEY_CLIENT_SECRET', "E6358B2E0EEA95404143EA392BADB6759923802495B2402C0A1272418B04846ABFAAFACFE019AAE6DB0C142FBC29074B7C153E1EF7BFB358143B0D03DE21E0DA")
+YOOMONEY_WALLET = os.getenv('YOOMONEY_WALLET', "4100119411236581")
+YOOMONEY_REDIRECT_URI = os.getenv('YOOMONEY_REDIRECT_URI', "https://albi-music.ru/oauth/callback")
+YOOMONEY_SCOPE = os.getenv('YOOMONEY_SCOPE', "payment-p2p account-info")
+YOOMONEY_AUTH_URL = os.getenv('YOOMONEY_AUTH_URL', "https://yoomoney.ru/oauth/authorize")
+YOOMONEY_TOKEN_URL = os.getenv('YOOMONEY_TOKEN_URL', "https://yoomoney.ru/oauth/token")
+YOOMONEY_API_URL = os.getenv('YOOMONEY_API_URL', "https://yoomoney.ru/api")
+
+# Redis для Celery
+BROKER_URL = os.getenv('BROKER_URL', 'amqp://albimusic:StrongPassword123!@localhost:5672//')
+
+# База данных PostgreSQL - из переменных окружения
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_PORT = os.getenv('DB_PORT', '5432')
+DB_NAME = os.getenv('DB_NAME', 'albimusic_bot')
+DB_USER = os.getenv('DB_USER', 'albimusic_user')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'aXAnAixKT6@?B9')
+
+# Для обратной совместимости (на случай если код использует DB_CONFIG)
+DB_CONFIG = {
+    'host': DB_HOST,
+    'port': int(DB_PORT),
+    'database': DB_NAME,
+    'user': DB_USER,
+    'password': DB_PASSWORD
+}
+
+# Redis для Celery (альтернативный формат)
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+
+# Админ бота
+ADMIN_ID = int(os.getenv('ADMIN_ID', '338544009'))  # ТЕСТ: сменить на 338544009 для боевого режима
+
+# Канал для публикации треков (альтернативное название)
+CHANNEL_ID = os.getenv('CHANNEL_ID', '@ALBImusic_chart')
+
+# Пути для загрузки аудио
+UPLOAD_DIR = os.getenv('UPLOAD_DIR', '/tmp/albimusic_uploads')
+
+# Возврат URL для платежей
+YOOKASSA_RETURN_URL = os.getenv('YOOKASSA_RETURN_URL', 'https://albi-music.ru/payment_success')
+
+# VK OAuth (веб-версия)
+VK_APP_ID = os.getenv('VK_APP_ID', '54451761')
+VK_CLIENT_SECRET = os.getenv('VK_CLIENT_SECRET', 'EXsS6C2HrdCS8I5Pddjn')
+
+# Yandex OAuth (веб-версия)
+YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID', 'b70f75fc77be48b7a9edb745fcd78670')
+YANDEX_CLIENT_SECRET = os.getenv('YANDEX_CLIENT_SECRET', 'a750e263bf6e4bb68d53437624164197')
+
+# Сообщение для валидации
+def validate():
+    errors = []
+    if BOT_TOKEN == '8078747945:AAELaCEzbPUdwwilFBy_TJi9LsBb5scyzVU':
+        errors.append("⚠️  BOT_TOKEN: Используется значение по умолчанию")
+    if SUNO_API_KEY == '615290cfecdf58e6251835ba7971ab65':
+        errors.append("⚠️  SUNO_API_KEY: Используется значение по умолчанию")
+    return errors

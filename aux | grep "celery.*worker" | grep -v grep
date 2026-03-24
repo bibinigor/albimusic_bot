@@ -1,0 +1,16 @@
+○ albimusic-celery.service - Albimusic Celery Worker
+     Loaded: loaded (/etc/systemd/system/albimusic-celery.service; enabled; vendor preset: enabled)
+     Active: inactive (dead) since Wed 2025-11-26 13:10:21 MSK; 1 day 2h ago
+   Main PID: 3337210 (code=exited, status=0/SUCCESS)
+        CPU: 595ms
+
+Nov 26 13:09:23 5173749-om69931 celery[3337210]:   . celery_tasks.generate_song_task
+Nov 26 13:09:23 5173749-om69931 celery[3337210]:   . celery_tasks.test_task
+Nov 26 13:09:24 5173749-om69931 celery[3337210]: [2025-11-26 13:09:24,016: INFO/MainProcess] Connected to redis://localhost:6379/0
+Nov 26 13:09:24 5173749-om69931 celery[3337210]: [2025-11-26 13:09:24,019: INFO/MainProcess] mingle: searching for neighbors
+Nov 26 13:09:25 5173749-om69931 celery[3337210]: [2025-11-26 13:09:25,025: INFO/MainProcess] mingle: all alone
+Nov 26 13:09:25 5173749-om69931 celery[3337210]: [2025-11-26 13:09:25,035: INFO/MainProcess] celery@5173749-om69931 ready.
+Nov 26 13:10:20 5173749-om69931 systemd[1]: Stopping Albimusic Celery Worker...
+Nov 26 13:10:20 5173749-om69931 celery[3337210]: worker: Warm shutdown (MainProcess)
+Nov 26 13:10:21 5173749-om69931 systemd[1]: albimusic-celery.service: Deactivated successfully.
+Nov 26 13:10:21 5173749-om69931 systemd[1]: Stopped Albimusic Celery Worker.

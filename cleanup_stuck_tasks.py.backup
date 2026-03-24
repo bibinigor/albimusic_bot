@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""
+Скрипт автоматической очистки зависших задач.
+Запускать по cron каждый час.
+"""
+import psycopg2
+import logging
+from datetime import datetime, timedelta
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def cleanup_stuck_tasks():
+    """Очистка задач зависших более 2 часов"""
+    try:
+        conn = psycopg2.connect(
+            "dbname=albimusic_bot user=albimusic_user "
+            "password='aXAnAixKT6@?B9' host=localhost"
+        )
+        cur = conn.cursor()
+        
+        # 1. Находим зависшие задачи
+        cur.execute("""
+            SELECT COUNT(*) 
+            FROM generations 
+            WHERE status IN ('processing', 'pending') 
+              AND created_at < NOW() - INTERVAL '2 hours'
+        """)
+        stuck_count = cur.fetchone()[0]
+        
+        if stuck_count > 0:
+            # 2. Помечаем как failed
+            cur.execute("""
+                UPDATE generations 
+                SET status = 'failed', 
+                    audio_url = 'timeout_auto_cleanup'
+                WHERE status IN ('processing', 'pending') 
+                  AND created_at < NOW() - INTERVAL '2 hours'
+            """)
+            conn.commit()
+            logger.info(f"✅ Автоочистка: {stuck_count} задач помечены как failed")
+            
+            # 3. Логируем для админа
+            cur.execute("""
+                INSERT INTO admin_logs (action, details, created_at)
+                VALUES ('auto_cleanup', %s, NOW())
+            """, (f"Cleaned {stuck_count} stuck tasks",))
+            conn.commit()
+        else:
+            logger.info("✅ Нет зависших задач для очистки")
+            
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка автоочистки: {e}")
+
+if __name__ == "__main__":
+    cleanup_stuck_tasks()

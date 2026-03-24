@@ -1,0 +1,23 @@
+АУДИТ FIX #1: SQLite + PostgreSQL смешение
+Дата: 2024-12-24 11:15:00
+Статус: ✅ ВЫПОЛНЕНО
+
+ИСПРАВЛЕННЫЙ ФАЙЛ: main_with_payments.py
+
+ИЗМЕНЕНИЯ:
+1. Удален импорт sqlite3
+2. Удалена функция init_db() (SQLite инициализация)
+3. Обновлены 4 функции на PostgreSQL:
+   - add_balance()
+   - save_user_token() 
+   - add_channel_post()
+   - get_user_token()
+4. Удалены все упоминания bot.db
+5. Заменены sqlite3.Error на Exception
+
+ПРОВЕРКИ:
+- grep sqlite3: пустой вывод ✅
+- grep bot.db: пустой вывод ✅
+- python -m py_compile: успешно ✅
+
+СЛЕДУЮЩАЯ ПРОБЛЕМА: 6 копий translate_style_to_english() в celery_tasks.py

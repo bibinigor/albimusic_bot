@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  bot-primary:
+    image: albimusic-bot:latest
+    container_name: albimusic-bot-primary
+    environment:
+      - DB_HOST=localhost
+      - DB_PORT=5432
+      - DB_NAME=albimusic_bot
+      - DB_USER=albimusic_user
+      - DB_PASSWORD=aXAnAixKT6@?B9
+      - REDIS_HOST=localhost
+      - REDIS_PORT=6379
+      - BOT_PORT=8000
+    network_mode: "host"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  bot-monitor:
+    image: alpine
+    container_name: albimusic-monitor
+    command: |
+      sh -c "
+      while true; do
+        if ! curl -f http://localhost:8000/docs >/dev/null 2>&1; then
+          echo '🔄 Primary bot failed, starting backup...'
+          docker start albimusic-bot-backup
+        fi
+        sleep 30
+      done
+      "
+    network_mode: "host"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      - bot-primary
+
+  nginx:
+    image: nginx:alpine
+    container_name: albimusic-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped

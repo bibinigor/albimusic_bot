@@ -1,0 +1,24 @@
+# AlBi Music Web API Requirements
+# Python 3.10+
+
+# FastAPI
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# HTTP клиент
+httpx==0.25.2
+
+# JWT токены
+PyJWT==2.8.0
+
+# База данных (уже установлено для бота)
+psycopg2-binary==2.9.9
+
+# Celery (уже установлено)
+celery==5.3.4
+redis==5.0.1
+
+# Прочее
+python-dotenv==1.0.0
+pydantic==2.5.2

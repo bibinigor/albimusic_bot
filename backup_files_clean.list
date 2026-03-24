@@ -1,0 +1,32 @@
+# Основные файлы проекта
+main_with_payments.py
+celery_tasks.py
+config.py
+db_utils.py
+postgres_db.py
+run_monitor_notify.py
+integrate_translator.py
+requirements.txt
+.env
+
+# Лэндинг сайта (без аудио)
+landing/style.css
+landing/index.html
+landing/script.js
+
+# Systemd сервисы
+/etc/systemd/system/albimusic-bot.service
+/etc/systemd/system/albimusic-celery.service
+/etc/systemd/system/albimusic-monitor.service
+
+# Документация
+README.md
+PROJECT_STRUCTURE.md
+
+# Важные скрипты
+cleanup_stuck_tasks.py
+cleanup_old_records.py
+
+# База данных
+init_tables.sql
+create_postgres_tables.sql

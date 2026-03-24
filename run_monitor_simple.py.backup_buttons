@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+Безопасный монитор уведомлений AlBi-music Bot
+БЕЗ конфликтов с основным ботом
+"""
+
+import sys
+import asyncio
+import logging
+import time
+from datetime import datetime
+import psycopg2
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger('albimusic_monitor')
+
+# Конфигурация БД
+DB_CONFIG = {
+    'host': 'localhost',
+    'database': 'albimusic_bot',
+    'user': 'albimusic_user',
+    'password': 'aXAnAixKT6@?B9'
+}
+
+# Импортируем Bot только когда действительно нужен
+import config
+
+def execute_query(query, params=None):
+    """Выполняет SQL запрос к БД"""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        
+        # Определяем тип запроса
+        query_upper = query.strip().upper()
+        if query_upper.startswith('SELECT') or 'RETURNING' in query_upper:
+            result = cursor.fetchall()
+        else:
+            conn.commit()
+            result = cursor.rowcount
+        
+        cursor.close()
+        conn.close()
+        
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка выполнения запроса: {e}")
+        raise
+
+async def send_single_notification(user_id, message_text):
+    """Отправляет одно уведомление пользователю"""
+    from aiogram import Bot
+    from aiogram import Bot
+    
+    session = None
+    bot = None
+    
+    try:
+        logger.debug(f"📤 Подготовка к отправке уведомления пользователю {user_id}")
+        
+        # Создаем новую сессию для каждого уведомления
+        bot = Bot(token=config.BOT_TOKEN)
+        
+        # Создаем бота с новой сессией
+        bot = Bot(token=config.BOT_TOKEN)
+        
+        # Отправляем сообщение
+        await bot.send_message(chat_id=user_id, text=message_text)
+        logger.debug(f"✅ Уведомление отправлено пользователю {user_id}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+        return False
+        
+    finally:
+        # ВАЖНО: Закрываем сессию сразу после отправки
+        if session:
+            try:
+                logger.debug(f"✅ Сессия для пользователя {user_id} закрыта")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка закрытия сессии для {user_id}: {e}")
+
+async def check_completed_tasks():
+    """Проверяет завершенные задачи и отправляет уведомления"""
+    logger.info("🔄 Проверка завершенных задач...")
+    
+    try:
+        # Получаем завершенные задачи, которые еще не были уведомлены
+        query = """
+            SELECT task_id, user_id, prompt, audio_url, status 
+            FROM generations 
+            WHERE notified = FALSE 
+              AND (status = 'completed' OR status = 'error')
+            ORDER BY created_at ASC
+            LIMIT 10
+        """
+        
+        tasks = execute_query(query)
+        
+        if not tasks:
+            logger.info("📭 Нет новых завершенных задач для уведомления")
+            return
+        
+        logger.info(f"📨 Найдено {len(tasks)} задач для уведомления")
+        
+        sent_count = 0
+        
+        for task in tasks:
+            task_id, user_id, prompt, audio_url, status = task
+            
+            logger.info(f"📨 Обработка задачи {task_id} для пользователя {user_id} (статус: {status})")
+            
+            try:
+                if status == 'completed':
+                    message_text = f"🎵 Ваша музыка готова!\n\n"
+                    if prompt:
+                        message_text += f"📝 Запрос: {prompt[:100]}...\n\n"
+                    message_text += f"🎧 Ссылка: {audio_url}\n\n"
+                    message_text += "Музыка также опубликована в канале @ALBImusic_chart"
+                    
+                elif status == 'error':
+                    message_text = f"❌ К сожалению, генерация не удалась.\n\n"
+                    if prompt:
+                        message_text += f"📝 Запрос: {prompt[:100]}...\n\n"
+                    message_text += "Попробуйте снова или обратитесь в поддержку."
+                
+                else:
+                    continue
+                
+                # Отправляем уведомление
+                success = await send_single_notification(user_id, message_text)
+                
+                if success:
+                    # Помечаем как отправленное
+                    execute_query(
+                        "UPDATE generations SET notified = TRUE WHERE task_id = %s",
+                        (task_id,)
+                    )
+                    logger.info(f"✅ Задача {task_id} отправлена и помечена как отправленная")
+                    sent_count += 1
+                else:
+                    logger.warning(f"⚠️ Задача {task_id} не отправлена (ошибка отправки)")
+            
+            except Exception as e:
+                logger.error(f"❌ Ошибка обработки задачи {task_id}: {e}")
+            
+            # Небольшая пауза между отправками
+            await asyncio.sleep(0.5)
+        
+        logger.info(f"✅ Обработано {sent_count}/{len(tasks)} уведомлений")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке задач: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+async def main_loop():
+    """Главный цикл мониторинга"""
+    logger.info("🚀 Запуск безопасного монитора уведомлений...")
+    logger.info("⚠️  Внимание: Бот не держит постоянные сессии с Telegram API")
+    
+    iteration = 0
+    errors_count = 0
+    max_consecutive_errors = 5
+    
+    while True:
+        iteration += 1
+        
+        try:
+            logger.info(f"🔄 Итерация #{iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Вызываем проверку и отправку уведомлений
+            await check_completed_tasks()
+            
+            # Сбрасываем счетчик ошибок
+            errors_count = 0
+            
+            # Пауза перед следующей проверкой
+            logger.debug("💤 Пауза 30 секунд...")
+            await asyncio.sleep(30)
+            
+        except KeyboardInterrupt:
+            logger.info("⚠️  Получен сигнал остановки")
+            break
+            
+        except Exception as e:
+            errors_count += 1
+            logger.error(f"❌ Ошибка в итерации #{iteration}: {e}")
+            
+            if errors_count >= max_consecutive_errors:
+                logger.critical(f"🔥 Превышено максимальное количество ошибок ({max_consecutive_errors})")
+                logger.critical("🔥 Монитор завершает работу")
+                break
+            
+            logger.info("⏳ Пауза 60 секунд после ошибки...")
+            await asyncio.sleep(60)
+    
+    logger.info("👋 Монитор остановлен")
+
+async def main():
+    try:
+        await main_loop()
+    finally:
+        logger.info("✅ Завершение работы монитора...")
+
+if __name__ == "__main__":
+    asyncio.run(main())

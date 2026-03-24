@@ -1,0 +1,14 @@
+[Unit]
+Description=Monitor Replicate Tasks Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/albimusic-bot
+ExecStart=/usr/bin/python3 monitor_replicate_tasks.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

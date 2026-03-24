@@ -1,0 +1,761 @@
+#!/usr/bin/env python3
+import time
+import logging
+from celery import Celery
+import json
+import config
+from db_utils import execute_query_sync
+
+# Инициализация пула БД
+from db_utils import init_db_pool_sync
+init_db_pool_sync()
+
+import requests
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Словарь перевода русских музыкальных терминов для Suno API
+MUSIC_STYLE_TRANSLATIONS = {
+    # Жанры
+    "рок": "rock",
+    "поп": "pop",
+    "метал": "metal",
+    "хард-рок": "hard rock",
+    "хеви-метал": "heavy metal",
+    "джаз": "jazz",
+    "блюз": "blues",
+    "электрон": "electronic",
+    "хип-хоп": "hip hop",
+    "рэп": "rap",
+    "фолк": "folk",
+    "классическ": "classical",
+    "инди": "indie",
+    
+    # Инструменты
+    "гитар": "guitar",
+    "электрогитар": "electric guitar",
+    "соло": "solo",
+    "бас": "bass",
+    "бас-гитар": "bass guitar",
+    "ударн": "drums",
+    "барабан": "drum",
+    "синтезатор": "synthesizer",
+    "фортепиано": "piano",
+    "пианино": "piano",
+    "скрипка": "violin",
+    "струнн": "strings",
+    "оркестр": "orchestra",
+    "орган": "organ",
+    
+    # Вокал
+    "вокал": "vocal",
+    "мужск": "male",
+    "женск": "female",
+    "хор": "choir",
+    "голос": "voice",
+    
+    # Темп/атмосфера
+    "быстр": "fast",
+    "медлен": "slow",
+    "темп": "tempo",
+    "энергичн": "energetic",
+    "спокойн": "calm",
+    "агрессивн": "aggressive",
+    "грустн": "sad",
+    "радостн": "happy",
+    "эпичн": "epic",
+    "драйв": "driving beat",
+}
+
+def translate_style_to_english(russian_style):
+    """Переводит русский стиль в английский для лучшего понимания Suno API"""
+    if not russian_style:
+        return ""
+    
+    # Приводим к нижнему регистру для поиска
+    style_lower = russian_style.lower()
+    
+    # Проверяем есть ли русские буквы
+    has_russian = any("а" <= char <= "я" for char in style_lower)
+    
+    if not has_russian:
+        # Если нет русских букв, возвращаем как есть (уже английский)
+        return russian_style
+    
+    # Простой перевод: заменяем русские слова английскими
+    result = style_lower
+    for rus, eng in MUSIC_STYLE_TRANSLATIONS.items():
+        if rus in result:
+            result = result.replace(rus, eng)
+    
+    # Добавляем улучшения для лучшего понимания Suno
+    improvements = {
+        "electric guitar": "electric guitar solo lead, distorted rhythm guitar",
+        "bass guitar": "bass guitar, prominent bass",
+        "bass": "bass guitar",
+        "drums": "full drum kit",
+        "drum": "drum kit",
+        "male vocal": "male rock vocal, powerful voice",
+        "female vocal": "female vocal, clear voice",
+        "rock": "rock music",
+        "pop": "pop music",
+    }
+    
+    for key, value in improvements.items():
+        if key in result:
+            result = result + ", " + value
+    
+    # Убираем дубликаты и лишние запятые
+    words = [word.strip() for word in result.split(",") if word.strip()]
+    unique_words = []
+    for word in words:
+        if word not in unique_words:
+            unique_words.append(word)
+    
+    result = ", ".join(unique_words)
+    
+    # Логируем перевод
+    if russian_style != result:
+        logger.info(f"🔄 Перевод стиля: '{russian_style}' → '{result}'")
+    
+    return result
+
+# Словарь перевода русских музыкальных терминов для Suno API
+MUSIC_STYLE_TRANSLATIONS = {
+    # Жанры
+    "рок": "rock",
+    "поп": "pop",
+    "метал": "metal",
+    "хард-рок": "hard rock",
+    "хеви-метал": "heavy metal",
+    "джаз": "jazz",
+    "блюз": "blues",
+    "электрон": "electronic",
+    "хип-хоп": "hip hop",
+    "рэп": "rap",
+    "фолк": "folk",
+    "классическ": "classical",
+    "инди": "indie",
+    
+    # Инструменты
+    "гитар": "guitar",
+    "электрогитар": "electric guitar",
+    "соло": "solo",
+    "бас": "bass",
+    "бас-гитар": "bass guitar",
+    "ударн": "drums",
+    "барабан": "drum",
+    "синтезатор": "synthesizer",
+    "фортепиано": "piano",
+    "пианино": "piano",
+    "скрипка": "violin",
+    "струнн": "strings",
+    "оркестр": "orchestra",
+    "орган": "organ",
+    
+    # Вокал
+    "вокал": "vocal",
+    "мужск": "male",
+    "женск": "female",
+    "хор": "choir",
+    "голос": "voice",
+    
+    # Темп/атмосфера
+    "быстр": "fast",
+    "медлен": "slow",
+    "темп": "tempo",
+    "энергичн": "energetic",
+    "спокойн": "calm",
+    "агрессивн": "aggressive",
+    "грустн": "sad",
+    "радостн": "happy",
+    "эпичн": "epic",
+    "драйв": "driving beat",
+}
+
+
+# Полный словарь перевода русских музыкальных терминов для Suno API
+MUSIC_STYLE_TRANSLATIONS = {
+    "bass": "bass guitar",
+    "bass guitar": "bass guitar, prominent bass",
+    "drum": "drum kit",
+    "drums": "full drum kit",
+    "electric guitar": "electric guitar solo lead, distorted rhythm guitar",
+    "female vocal": "female vocal, clear voice",
+    "instrumental": "True",
+    "male vocal": "male rock vocal, powerful voice",
+    "model": "V5",
+    "pop": "pop music",
+    "prompt": "prompt,  # ТОЛЬКО описание музыки",
+    "rock": "rock music",
+    "styleWeight": "0.8",
+    "vocalGender": "m",  # не используется для инструментальной",
+    "weirdnessConstraint": "0.3",
+    "агрессивн": "aggressive",
+    "аккордеон": "accordion",
+    "акустическ": "acoustic",
+    "альтернатив": "alternative",
+    "ансамб": "ensemble",
+    "аранжиров": "arrangement",
+    "арф": "harp",
+    "банджо": "banjo",
+    "барабан": "drum",
+    "бас": "bass",
+    "бас-гитар": "bass guitar",
+    "блюз": "blues",
+    "быстр": "fast",
+    "весел": "happy",
+    "виолончел": "cello",
+    "вокал": "vocal",
+    "гармон": "harmony",
+    "гарп": "harp",
+    "гитар": "guitar",
+    "голос": "voice",
+    "грустн": "sad",
+    "дабстеп": "dubstep",
+    "детск": "child",
+    "джаз": "jazz",
+    "диско": "disco",
+    "драйв": "driving beat",
+    "драматич": "dramatic",
+    "дуэт": "duet",
+    "женск": "female",
+    "импровизац": "improvisation",
+    "инди": "indie",
+    "инструмент": "instrumental",
+    "кантри": "country",
+    "квартет": "quartet",
+    "квинтет": "quintet",
+    "клавиш": "keyboard",
+    "кларнет": "clarinet",
+    "классическ": "classical",
+    "контрабас": "double bass",
+    "ксилофон": "xylophone",
+    "лаунж": "lounge",
+    "мандолин": "mandolin",
+    "маракас": "maracas",
+    "медлен": "slow",
+    "мелод": "melody",
+    "метал": "metal",
+    "мужск": "male",
+    "нью-эйдж": "new age",
+    "орган": "organ",
+    "оркестр": "orchestra",
+    "панк": "punk",
+    "пение": "singing",
+    "пианино": "piano",
+    "поп": "pop",
+    "радостн": "happy",
+    "ребяческ": "children",
+    "регги": "reggae",
+    "ритм": "rhythm",
+    "рок": "rock",
+    "романтич": "romantic",
+    "рэп": "rap",
+    "саксофон": "saxophone",
+    "синтезатор": "synthesizer",
+    "скрип": "violin",
+    "скрипка": "violin",
+    "соло": "solo",
+    "соул": "soul",
+    "спокойн": "calm",
+    "струнн": "strings",
+    "тамбурин": "tambourine",
+    "темп": "tempo",
+    "техно": "techno",
+    "транс": "trance",
+    "трио": "trio",
+    "труб": "trumpet",
+    "ударн": "drums",
+    "фанк": "funk",
+    "флейт": "flute",
+    "фолк": "folk",
+    "фортепиан": "piano",
+    "фортепиано": "piano",
+    "хард-рок": "hard rock",
+    "хаус": "house",
+    "хеви-метал": "heavy metal",
+    "хип-хоп": "hip-hop",
+    "хор": "choir",
+    "хоров": "choir",
+    "электрогитар": "electric guitar",
+    "электрон": "electronic",
+    "эмбиент": "ambient",
+    "энергич": "energetic",
+    "энергичн": "energetic",
+    "эпическ": "epic",
+    "эпичн": "epic",
+}
+
+celery_app = Celery('albimusic_tasks', broker='redis://localhost:6379/0')
+celery_app.conf.update(
+    broker_connection_retry_on_startup=True,
+    task_serializer='json',
+    accept_content=['json'], 
+    result_serializer='json',
+    timezone='Europe/Moscow',
+    enable_utc=True,
+    result_backend='redis://localhost:6379/2',
+    task_ignore_result=False,
+    worker_hijack_root_logger=False,
+    worker_send_task_events=True,
+    task_send_sent_event=True,
+)
+
+
+def generate_suno_music_sync(prompt, is_song=False, custom_mode=False, user_id=None, style=None):
+    """Синхронная версия генерации музыки через Suno API с расширенным логированием"""
+    
+    import uuid
+    import time
+    request_id = str(uuid.uuid4())[:8]  # Короткий уникальный ID
+    start_time = time.time()
+    
+    logger.info(f"╔═══════════════════════════════════════════════════════════╗")
+    logger.info(f"║  SUNO API REQUEST | ID: {request_id} | User: {user_id}    ")
+    logger.info(f"╚═══════════════════════════════════════════════════════════╝")
+    
+    # ОТЛАДКА: Логируем что пришло на вход
+    logger.info(f"[{request_id}] 📝 INPUT PARAMETERS:")
+    logger.info(f"[{request_id}]    • Prompt: {prompt[:100]}..." if len(prompt) > 100 else f"[{request_id}]    • Prompt: {prompt}")
+    logger.info(f"[{request_id}]    • Style: {style}")
+    logger.info(f"[{request_id}]    • Custom mode: {custom_mode}")
+    logger.info(f"[{request_id}]    • Is song: {is_song}")
+    logger.info(f"[{request_id}]    • User ID: {user_id}")
+    
+    headers = {
+        "Authorization": f"Bearer {config.SUNO_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+
+    if is_song:
+        # Определяем пол вокала из стиля
+        vocal_gender = "m"  # по умолчанию мужской
+        if style and ("female" in style.lower() or "женск" in style.lower()):
+            vocal_gender = "f"
+        elif style and ("male" in style.lower() or "мужск" in style.lower()):
+            vocal_gender = "m"
+        
+        if custom_mode:
+            data = {
+                "prompt": prompt,  # ТОЛЬКО текст песни
+                "style": style if style else "",  # ТОЛЬКО стиль
+                "customMode": True,
+                "instrumental": False,
+                "styleWeight": 0.9,
+                "vocalsGender": vocal_gender
+            }
+        else:
+            data = {
+                "prompt": prompt,  # ТОЛЬКО текст песни
+                "style": style if style else "",  # ТОЛЬКО стиль
+                "customMode": False,
+                "instrumental": False,
+                "styleWeight": 0.8,
+                "vocalsGender": vocal_gender
+            }
+    else:
+        data = {
+            "prompt": prompt,  # ТОЛЬКО описание музыки
+            "style": style if style else "",  # ТОЛЬКО стиль
+            "customMode": False,
+            "instrumental": True,
+            "styleWeight": 0.8,
+        }
+    
+    # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ДАННЫХ
+    logger.info(f"[{request_id}] 📤 REQUEST DATA TO SUNO API:")
+    safe_data = data.copy()
+    if 'Authorization' in headers:
+        safe_headers = headers.copy()
+        safe_headers['Authorization'] = 'Bearer ***HIDDEN***'
+        logger.info(f"[{request_id}]    • Headers: {safe_headers}")
+    logger.info(f"[{request_id}]    • Data: {json.dumps(safe_data, ensure_ascii=False)}")
+    
+    try:
+        # Создаем задачу генерации
+        api_start = time.time()
+        response = requests.post(f"{config.SUNO_API_URL}/api/v1/generate", json=data, headers=headers, timeout=300)
+        api_duration = time.time() - api_start
+        
+        logger.info(f"[{request_id}] 📥 SUNO API RESPONSE:")
+        logger.info(f"[{request_id}]    • Status code: {response.status_code}")
+        logger.info(f"[{request_id}]    • Response time: {api_duration:.2f}s")
+        logger.info(f"[{request_id}]    • Response size: {len(response.content)} bytes")
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            logger.info(f"[{request_id}] 📥 SUNO API RESPONSE:")
+            logger.info(f"[{request_id}]    • Response size: {len(response.text)} bytes")
+            logger.info(f"[{request_id}]    • Response keys: {list(result.keys())}")
+            logger.info(f"[{request_id}]    • Full response: {json.dumps(result, ensure_ascii=False)[:500]}...")
+            
+            # Проверяем код ответа Suno API
+            api_code = result.get('code')
+            api_msg = result.get('msg', 'No message')
+            data_obj = result.get('data')
+            
+            if api_code != 200:
+                logger.error(f"[{request_id}] ❌ SUNO API ERROR:")
+                logger.error(f"[{request_id}]    • Code: {api_code}")
+                logger.error(f"[{request_id}]    • Message: {api_msg}")
+                logger.error(f"[{request_id}]    • Data: {data_obj}")
+                return None
+            
+            # Проверяем что data не null
+            if not data_obj:
+                logger.error(f"[{request_id}] ❌ SUNO API: data is null!")
+                logger.error(f"[{request_id}]    • Full response: {json.dumps(result, ensure_ascii=False)}")
+                return None
+            
+            # Проверяем что data - это словарь
+            if not isinstance(data_obj, dict):
+                logger.error(f"[{request_id}] ❌ ОШИБКА: result['data'] не является словарем!")
+                logger.error(f"[{request_id}]    • Тип: {type(data_obj)}")
+                logger.error(f"[{request_id}]    • Значение: {data_obj}")
+                return None
+            
+            logger.info(f"[{request_id}]    • Data keys: {list(data_obj.keys())}")
+            
+            # Извлекаем taskId
+            task_id = data_obj.get('taskId')
+            logger.info(f"[{request_id}] 🎵 SUNO TASK CREATED:")
+            logger.info(f"[{request_id}]    • Task ID: {task_id}")
+            
+            # Ожидаем завершения генерации
+            for i in range(90):  # 90 попыток по 10 секунд = 15 минут
+                time.sleep(10)
+                status_response = requests.get(f"{config.SUNO_API_URL}/api/v1/generate/record-info?taskId={task_id}", headers=headers, timeout=60)
+                status_duration = time.time() - api_start - api_duration - (i * 10)
+                
+                if status_response.status_code == 200:
+                    status_result = status_response.json()
+                    status = status_result.get('data', {}).get('status')
+                    
+                    logger.info(f"[{request_id}] 📊 TASK STATUS #{i+1}:")
+                    logger.info(f"[{request_id}]    • Status: {status}")
+                    logger.info(f"[{request_id}]    • Total wait time: {(i+1)*10}s")
+                    
+                    if status == 'SUCCESS':
+                        audio_data = status_result.get('data', {}).get('response', {}).get('sunoData', [])
+                        if audio_data:
+                            audio_url = audio_data[0].get('audioUrl')
+                            logger.info(f"[{request_id}] ✅ SUNO GENERATION COMPLETED:")
+                            logger.info(f"[{request_id}]    • Audio URL: {audio_url}")
+                            logger.info(f"[{request_id}]    • Total time: {time.time() - start_time:.2f}s")
+                            return audio_url
+                    elif status == 'ERROR':
+                        error_msg = status_result.get('data', {}).get('response', {}).get('error', 'Unknown error')
+                        logger.error(f"[{request_id}] ❌ SUNO GENERATION ERROR:")
+                        logger.error(f"[{request_id}]    • Error: {error_msg}")
+                        logger.error(f"[{request_id}]    • Full response: {json.dumps(status_result, ensure_ascii=False)}")
+                        return None
+                    elif i > 30 and status == "PENDING":
+                        logger.warning(f"[{request_id}] ⚠️ SUNO API SLOW:")
+                        logger.warning(f"[{request_id}]    • Task {task_id} still PENDING after {(i+1)*10} seconds")
+                else:
+                    logger.warning(f"[{request_id}] ⚠️ STATUS CHECK FAILED:")
+                    logger.warning(f"[{request_id}]    • Status code: {status_response.status_code}")
+                    logger.warning(f"[{request_id}]    • Response: {status_response.text[:500]}")
+            
+            logger.error(f"[{request_id}] ⏰ SUNO TIMEOUT:")
+            logger.error(f"[{request_id}]    • Task {task_id} timed out after 900 seconds")
+            return None
+        else:
+            logger.error(f"[{request_id}] ❌ SUNO API ERROR:")
+            logger.error(f"[{request_id}]    • Status: {response.status_code}")
+            logger.error(f"[{request_id}]    • Response: {response.text[:1000]}")
+            return None
+            
+    except requests.exceptions.Timeout as e:
+        logger.error(f"[{request_id}] ⏱️ SUNO REQUEST TIMEOUT:")
+        logger.error(f"[{request_id}]    • Error: {str(e)}")
+        logger.error(f"[{request_id}]    • Duration: {time.time() - start_time:.2f}s")
+        return None
+        
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[{request_id}] 🔌 SUNO CONNECTION ERROR:")
+        logger.error(f"[{request_id}]    • Error: {str(e)}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ UNEXPECTED SUNO ERROR:")
+        logger.error(f"[{request_id}]    • Type: {type(e).__name__}")
+        logger.error(f"[{request_id}]    • Error: {str(e)}")
+        return None
+
+def save_generation_task_sync(user_id, task_id, prompt, status, audio_url=None):
+    """Синхронное сохранение задачи в БД"""
+    try:
+        # Пробуем UPDATE если запись уже существует
+        update_result = execute_query_sync(
+            """UPDATE generations 
+            SET status = %s, audio_url = %s, updated_at = NOW()
+            WHERE task_id = %s""",
+            (status, audio_url, task_id)
+        )
+        
+        # Если UPDATE не нашел запись, делаем INSERT
+        if update_result == 0:
+            execute_query_sync(
+                """INSERT INTO generations (user_id, task_id, prompt, status, audio_url, created_at) 
+                VALUES (%s, %s, %s, %s, %s, NOW())""",
+                (user_id, task_id, prompt, status, audio_url)
+            )
+            logger.info(f"✅ INSERT: Задача {task_id} создана в БД")
+        else:
+            logger.info(f"✅ UPDATE: Задача {task_id} обновлена в БД")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения задачи {task_id}: {e}")
+        return False
+
+@celery_app.task(bind=True, name='generate_music_task', max_retries=3, default_retry_delay=30, time_limit=600, soft_time_limit=480)
+def generate_music_task(self, user_id, prompt, task_id=None):
+    """Синхронная задача генерации музыки с гарантированным сохранением результата"""
+
+    # Если task_id не передан, используем ID Celery задачи
+    if not task_id:
+        task_id = self.request.id
+
+    logger.info(f"🔄 Запуск генерации музыки для пользователя {user_id}, задача {task_id}")
+    result_status = 'error'
+    result_message = 'Неизвестная ошибка'
+    audio_url = None
+    
+    try:
+        # 1. СОХРАНЕНИЕ НАЧАЛА ЗАДАЧИ
+        save_success = save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=prompt,
+            status='processing'
+        )
+        
+        if not save_success:
+            logger.error(f"❌ Не удалось сохранить задачу {task_id} в БД")
+            result_message = 'Ошибка сохранения задачи'
+            raise Exception(result_message)
+        
+        # 2. ГЕНЕРАЦИЯ ЧЕРЕЗ SUNO API (основная работа)
+        audio_url = generate_suno_music_sync(
+            prompt=prompt,
+            is_song=False,
+            custom_mode=False,
+            user_id=user_id
+        )
+        
+        # 3. ОБРАБОТКА РЕЗУЛЬТАТА
+        if not audio_url:
+            logger.error(f"❌ Suno API вернул пустой результат для пользователя {user_id}")
+            result_status = 'error'
+            result_message = 'Генерация не удалась'
+        else:
+            result_status = 'completed'
+            result_message = 'Генерация успешна'
+            
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка генерации для {user_id}: {e}")
+        result_status = 'error'
+        result_message = str(e)
+        
+        # Пытаемся повторить задачу (максимум 3 раза)
+        try:
+            self.retry(countdown=30, max_retries=3)
+        except self.MaxRetriesExceededError:
+            logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+    
+    finally:
+        # 4. ГАРАНТИРОВАННОЕ СОХРАНЕНИЕ РЕЗУЛЬТАТА (ВЫПОЛНИТСЯ ВСЕГДА)
+        try:
+            save_generation_task_sync(
+                user_id=user_id,
+                task_id=task_id,
+                prompt=prompt,
+                status=result_status,
+                audio_url=audio_url if audio_url else f'ERROR: {result_message}'
+            )
+            logger.info(f"📝 Результат задачи {task_id} гарантированно сохранен: {result_status}")
+        except Exception as save_error:
+            logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить результат задачи {task_id}: {save_error}")
+            # Даже если не удалось сохранить в БД, Celery получит результат
+        
+        # 5. ВОЗВРАТ РЕЗУЛЬТАТА В CELERY
+        if result_status == 'completed':
+            return {
+                'status': 'success',
+                'user_id': user_id,
+                'audio_url': audio_url,
+                'task_id': task_id
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': result_message,
+                'task_id': task_id
+            }
+@celery_app.task(bind=True, name='generate_song_task', max_retries=3, default_retry_delay=30, time_limit=600, soft_time_limit=480)
+def generate_song_task(self, user_id, lyrics, style, custom_mode=False, task_id=None):
+    """Синхронная задача генерации песни с гарантированным сохранением результата"""
+    # Если task_id не передан, используем ID Celery задачи
+    if not task_id:
+        task_id = self.request.id
+
+    logger.info(f"🔄 Запуск генерации песни для пользователя {user_id}, задача {task_id}")
+    
+    result_status = 'error'
+    result_message = 'Неизвестная ошибка'
+    audio_url = None
+    translated_style = None
+    
+    try:
+        # 1. ПОДГОТОВКА ДАННЫХ ДЛЯ SUNO API
+        if style:
+            translated_style = translate_style_to_english(style)
+            logger.info(f"🔄 Перевод стиля '{style}' -> '{translated_style}'")
+            prompt = lyrics  # Только текст песни
+        else:
+            prompt = lyrics  # Только текст песни если стиль не указан
+        
+        # 2. СОХРАНЕНИЕ НАЧАЛА ЗАДАЧИ
+        save_success = save_generation_task_sync(
+            user_id=user_id,
+            task_id=task_id,
+            prompt=f"Стиль: {style if style else 'Не указан'}. Текст: {lyrics[:100]}...",
+            status='processing'
+        )
+        
+        if not save_success:
+            logger.error(f"❌ Не удалось сохранить задачу {task_id} в БД")
+            result_message = 'Ошибка сохранения задачи'
+            raise Exception(result_message)
+        
+        # 3. ГЕНЕРАЦИЯ ЧЕРЕЗ SUNO API
+        audio_url = generate_suno_music_sync(
+            prompt=prompt,
+            is_song=True,
+            custom_mode=custom_mode,
+            user_id=user_id,
+            style=translated_style
+        )
+        
+        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
+        if not audio_url:
+            logger.error(f"❌ Suno API вернул пустой результат для пользователя {user_id}")
+            result_status = 'error'
+            result_message = 'Генерация не удалась'
+        else:
+            result_status = 'completed'
+            result_message = 'Генерация успешна'
+            
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка генерации песни для {user_id}: {e}")
+        result_status = 'error'
+        result_message = str(e)
+        
+        # Пытаемся повторить задачу (максимум 3 раза)
+        try:
+            self.retry(countdown=30, max_retries=3)
+        except self.MaxRetriesExceededError:
+            logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+    
+    finally:
+        # 5. ГАРАНТИРОВАННОЕ СОХРАНЕНИЕ РЕЗУЛЬТАТА (ВЫПОЛНИТСЯ ВСЕГДА)
+        try:
+            save_generation_task_sync(
+                user_id=user_id,
+                task_id=task_id,
+                prompt=f"Стиль: {style if style else 'Не указан'}. Текст: {lyrics[:100]}...",
+                status=result_status,
+                audio_url=audio_url if audio_url else f'ERROR: {result_message}'
+            )
+            logger.info(f"📝 Результат задачи {task_id} гарантированно сохранен: {result_status}")
+        except Exception as save_error:
+            logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить результат задачи {task_id}: {save_error}")
+            # Даже если не удалось сохранить в БД, Celery получит результат
+        
+        # 6. ВОЗВРАТ РЕЗУЛЬТАТА В CELERY
+        if result_status == 'completed':
+            return {
+                'status': 'success',
+                'user_id': user_id,
+                'audio_url': audio_url,
+                'task_id': task_id
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': result_message,
+                'task_id': task_id
+            }
+@celery_app.task(name='celery_tasks.test_task')
+def test_task():
+    """Тестовая задача"""
+    logger.info("✅ Тестовая задача выполнена")
+    return {'status': 'success', 'message': 'Test task completed'}
+
+
+# ═══════════════════════════════════════════════════════════════
+# CELERY SIGNALS: ИНИЦИАЛИЗАЦИЯ БД В WORKERS
+# Автоматическая настройка пула соединений при запуске/остановке
+# ═══════════════════════════════════════════════════════════════
+
+from celery.signals import worker_process_init, worker_process_shutdown
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@worker_process_init.connect
+def init_worker_db_pool(**kwargs):
+    """
+    Инициализация пула БД при запуске worker процесса.
+    Вызывается автоматически Celery при старте каждого worker процесса.
+    """
+    logger.info("🚀 [WORKER INIT] Initializing database connection pool...")
+
+    try:
+        from db_utils import initialize_pool_for_worker
+        initialize_pool_for_worker()
+        logger.info("✅ [WORKER INIT] Database pool initialized successfully")
+    except ImportError as e:
+        logger.warning(f"⚠️  [WORKER INIT] Function not found: {e}")
+        logger.info("   Using default connection mechanism")
+    except Exception as e:
+        logger.error(f"❌ [WORKER INIT] Failed to initialize DB pool: {e}")
+        raise
+
+
+@worker_process_shutdown.connect
+def shutdown_worker_db_pool(**kwargs):
+    """
+    Закрытие пула БД при остановке worker процесса.
+    Вызывается автоматически Celery при завершении worker процесса.
+    """
+    logger.info("🔒 [WORKER SHUTDOWN] Closing database connection pool...")
+
+    try:
+        from db_utils import shutdown_pool_for_worker
+        shutdown_pool_for_worker()
+        logger.info("✅ [WORKER SHUTDOWN] Database pool closed successfully")
+    except ImportError as e:
+        logger.warning(f"⚠️  [WORKER SHUTDOWN] Function not found: {e}")
+    except Exception as e:
+        logger.error(f"❌ [WORKER SHUTDOWN] Failed to close DB pool: {e}")
+
+
+@worker_process_init.connect
+def log_worker_ready(**kwargs):
+    """Логирование готовности worker к обработке задач"""
+    logger.info("✅ [WORKER] Ready to process tasks")
+
+# ═══════════════════════════════════════════════════════════════
+# КОНЕЦ SIGNALS
+# ═══════════════════════════════════════════════════════════════

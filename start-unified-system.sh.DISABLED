@@ -1,0 +1,18 @@
+#!/bin/bash
+echo "🚀 Запуск единой системы AlBi-music..."
+
+# Останавливаем старые процессы
+pkill -f "python.*main_with_payments" || true
+pkill -f "celery.*worker" || true
+
+# Запускаем бота в фоне
+echo "🤖 Запуск Telegram бота..."
+nohup python main_with_payments.py > bot.log 2>&1 &
+
+# Запускаем Celery worker
+echo "🔧 Запуск Celery worker..."
+celery -A celery_tasks.celery_app worker --loglevel=info --concurrency=2 --pool=prefork > celery.log 2>&1 &
+
+echo "✅ Система запущена!"
+echo "📋 Проверка процессов:"
+ps aux | grep -E "(python.*main_with_payments|celery.*worker)" | grep -v grep

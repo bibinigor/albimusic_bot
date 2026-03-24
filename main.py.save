@@ -1,0 +1,82 @@
+import logging
+import os
+import asyncio
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.client.default import DefaultBotProperties
+
+# Импортируем фильтры для команд и callback-ов
+from aiogram.filters import CommandStart, Command
+
+# Инициализация логирования
+logging.basicConfig(level=logging.INFO)
+
+# --- НАСТРОЙКА ТОКЕНА БОТА ---
+API_TOKEN = os.getenv('BOT_TOKEN')
+if not API_TOKEN:
+    # !!! ВАЖНО: ВСТАВЬ СЮДА СВОЙ ТОКЕН БОТА !!!
+    API_TOKEN = '8078747945:AAELaCEzbPUdwwilFBy_TJi9LsBb5scyzVU'
+# -------------------------------
+
+# Инициализация бота
+# Используем DefaultBotProperties для передачи parse_mode="HTML"
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+
+# Инициализация хранилища состояний (FSM)
+storage = MemoryStorage()
+
+# Инициализация диспетчера
+# В aiogram v3.x Dispatcher принимает storage при инициализации
+dp = Dispatcher(storage=storage)
+
+# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+
+# Обработчик команды /start
+# Используем CommandStart из aiogram.filters
+@dp.message(CommandStart())
+async def send_welcome(message: types.Message):
+    """
+    Отправляет приветственное сообщение при команде /start.
+    Создает inline-кнопку.
+    """
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("Нажми меня!", callback_data="button_pressed"))
+
+    await message.reply(
+        "Привет! Я твой бот. Нажми кнопку ниже:\n"
+        "Нажми /help для получения списка команд.",
+        reply_markup=markup
+    )
+
+# Обработчик команды /help
+# Используем Command из aiogram.filters
+@dp.message(Command('help'))
+async def send_help(message: types.Message):
+    """
+    Отправляет сообщение со списком доступных команд.
+    """
+    help_text = (
+        "Список доступных команд:\n"
+        "/start - Начать работу с ботом.\n"
+        "/help - Показать это сообщение.\n"
+    )
+    await message.reply(help_text)
+
+# Обработчик нажатия на inline-кнопку
+# Фильтрация по callback_data
+@dp.callback_query(lambda c: c.data == 'button_pressed')
+async def process_callback_button(callback_query: types.CallbackQuery, state: FSMContext):
+    """
+    Обрабатывает нажатие на inline-кнопку с callback_data 'button_pressed'.
+    """
+    await bot.answer_callback_query(callback_query.id) # Подтверждаем получение callback
+    await callback_query.message.answer("Ты нажал на кнопку! Я получил твоё сообщение.")
+
+# --- ЗАПУСК БОТА ---
+
+if __name__ == '__main__':
+        # Передаем экземпляр бота в start_polling
+        asyncio.run(dp.start_polling(bot=bot))
+        print("Бот запущен! Нажмите Ctrl+C для остановки.")
