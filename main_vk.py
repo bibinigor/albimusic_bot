@@ -9,7 +9,7 @@ from vk_config import VK_TOKEN, VK_GROUP_ID, DEBUG, ADMIN_VK_ID
 from db_utils import execute_query_sync, init_db_pool_sync
 
 # Список базовых команд для сброса состояния
-RESET_COMMANDS = ["начать", "start", "меню", "🏠 в главное меню", "❌ отмена", "отмена"]
+RESET_COMMANDS = ["начать", "start", "меню", "🏠 в главное меню", "🏠 В главное меню", "❌ отмена", "отмена"]
 # Список команд главного меню
 MENU_COMMANDS = ["💰 баланс", "📂 мои треки", "🎵 создать песню", "🎶 создать музыку", "🎧 примеры песен", "📞 поддержка", "⚙️ админ"]
 
@@ -242,6 +242,7 @@ class VKBot:
         
         # Логируем все входящие сообщения до любой обработки
         logger.info(f"📩 Получено новое сообщение от {user_id}: '{text}' (в нижнем регистре: '{text_lower}')")
+        print(f"Получено сообщение: {text}")
         
         try:
             # Флаг для отслеживания обработки команды
@@ -291,33 +292,6 @@ class VKBot:
                 return
 
             # Обработка команд меню
-            # Проверяем базовые команды до любой другой обработки
-            if text_lower in RESET_COMMANDS:
-                logger.info(f"🔄 Получена команда сброса состояния от {user_id}: '{text}'")
-                self.reset_state(user_id)
-                welcome_text = "Вы вернулись в главное меню!"
-                
-                if text_lower in ["начать", "start"]:
-                    welcome_text = """🎵 Привет! Я — бот для создания музыки с помощью ИИ.
-
-🎼 Что я умею:
-• Создавать песни с вашим текстом
-• Генерировать инструментальную музыку
-• Сочинять тексты для песен
-
-💫 Первая генерация — бесплатно!
-🎁 Выберите действие в меню 👇"""
-                
-                keyboard = self.get_main_keyboard(user_id)
-                if keyboard:
-                    result = self.send_message(
-                        user_id=user_id,
-                        message=welcome_text,
-                        keyboard=keyboard
-                    )
-                    logger.info(f"📨 Отправка сообщения: {'успешно' if result else 'ошибка'}")
-                command_handled = True
-                return
 
             # Обработка команд меню
             if "создать песню" in text_lower:
@@ -443,7 +417,7 @@ class VKBot:
                         command_handled = True
 
             # Обработка команды возврата в главное меню
-            if text == "🏠 В главное меню":
+            if "в главное меню" in text_lower or text == "🏠 В главное меню":
                 self.reset_state(user_id)
                 self.send_message(
                     user_id=user_id,
@@ -496,47 +470,6 @@ class VKBot:
                 command_handled = True
 
 
-            elif text == "🎶 Создать музыку":
-                logger.info(f"🎶 Запрос на создание инструментальной музыки от пользователя {user_id}")
-                
-                # Проверяем баланс пользователя перед созданием
-                try:
-                    result = execute_query_sync(
-                        "SELECT balance FROM users WHERE user_id = %s",
-                        (user_id,)
-                    )
-                    if result and result[0][0] > 0:
-                        self.user_states[user_id] = UserState.WAITING_INSTRUMENTAL_DESCRIPTION
-                        prompt_message = """✨ Напишите описание для вашей ИНСТРУМЕНТАЛЬНОЙ музыки (без вокала):
-
-• Стиль и жанр (рок, поп, электронная и т.д.)
-• Настроение и атмосфера (веселая, грустная, энергичная)
-• Темп (быстрый, медленный, умеренный)
-• Основные инструменты (гитара, пианино, синтезатор)
-
-💫 Чем подробнее описание, тем лучше результат!
-❌ Чтобы отменить создание, нажмите кнопку "Отмена"."""
-                        
-                        self.send_message(
-                            user_id=user_id,
-                            message=prompt_message,
-                            keyboard=self.get_home_keyboard()
-                        )
-                        logger.info(f"✅ Пользователь {user_id} переведен в режим ожидания описания инструментальной музыки")
-                    else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно генераций. Пополните баланс!",
-                            keyboard=self.get_main_keyboard()
-                        )
-                        logger.warning(f"⚠️ Попытка создания музыки при нулевом балансе: {user_id}")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка при проверке баланса для создания музыки: {e}")
-                    self.send_message(
-                        user_id=user_id,
-                        message="❌ Произошла ошибка. Попробуйте позже.",
-                        keyboard=self.get_main_keyboard()
-                    )
 
             elif "админ" in text_lower:
                 logger.info(f"⚙️ Запрос админ-панели от пользователя {user_id}")
