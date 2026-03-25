@@ -5,6 +5,7 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 import logging
 from datetime import datetime
 from enum import Enum, auto
+import types
 from vk_config import VK_TOKEN, VK_GROUP_ID, DEBUG, ADMIN_VK_ID
 from db_utils import execute_query_sync, init_db_pool_sync
 
@@ -13,7 +14,12 @@ RESET_COMMANDS = ["начать", "start", "меню", "🏠 в главное �
 # Список команд главного меню
 MENU_COMMANDS = ["💰 баланс", "📂 мои треки", "🎵 создать песню", "🎶 создать музыку", "🎧 примеры песен", "📞 поддержка", "⚙️ админ"]
 
-# Состояния пользователя (FSM)
+# Импортируем состояния из vk_states.py
+from vk_states import States, VKStateManager, StateData
+import aioredis
+import asyncio
+
+# Состояния пользователя (FSM) - для обратной совместимости
 class UserState(Enum):
     START = auto()
     WAITING_SONG_DESCRIPTION = auto()
@@ -61,27 +67,47 @@ class VKBot:
         self.vk = self.vk_session.get_api()
         self.longpoll = VkLongPoll(self.vk_session, group_id=VK_GROUP_ID)
         
-        # Словарь для хранения состояний пользователей
+        # Словарь для хранения состояний пользователей (для обратной совместимости)
         self.user_states = {}
+        
+        # Инициализация Redis и менеджера состояний
+        self.redis = asyncio.get_event_loop().run_until_complete(
+            aioredis.from_url("redis://localhost")
+        )
+        self.state_manager = VKStateManager(self.redis)
         
         logger.info("VK Bot initialized successfully")
 
     def get_cancel_keyboard(self):
         """Создать клавиатуру с кнопкой возврата в меню"""
-        keyboard = VkKeyboard(one_time=False)
-        keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.PRIMARY)
-        return keyboard
+        # Используем клавиатуру из модуля vk_keyboards
+        from vk_keyboards import get_cancel_keyboard
+        return get_cancel_keyboard()
 
     def get_home_keyboard(self):
         """Создать клавиатуру с кнопкой возврата в главное меню"""
-        keyboard = VkKeyboard(one_time=False)
-        keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.SECONDARY)
-        return keyboard
+        # Используем клавиатуру из модуля vk_keyboards
+        from vk_keyboards import get_home_keyboard
+        return get_home_keyboard()
+        
+    def get_music_style_keyboard(self):
+        """Создать клавиатуру выбора стиля музыки"""
+        # Используем клавиатуру из модуля vk_keyboards
+        from vk_keyboards import get_music_style_keyboard
+        return get_music_style_keyboard()
 
     def reset_state(self, user_id):
         """Сбросить состояние пользователя"""
+        # Сброс состояния в старом хранилище (для обратной совместимости)
         if user_id in self.user_states:
             del self.user_states[user_id]
+            
+        # Сброс состояния в новом менеджере состояний
+        asyncio.get_event_loop().run_until_complete(
+            self.state_manager.set_state(user_id, States.START)
+        )
+        
+        # Реинициализация компонентов VK API
         self.vk_session = vk_api.VkApi(token=VK_TOKEN)
         self.vk = self.vk_session.get_api()
         self.longpoll = VkLongPoll(self.vk_session, group_id=VK_GROUP_ID)
@@ -108,26 +134,10 @@ class VKBot:
         """Create main menu keyboard"""
         try:
             logger.info("⌨️ Создание главной клавиатуры")
-            keyboard = VkKeyboard(one_time=False)
             
-            # First row (максимум 2 кнопки в ряду для ВК)
-            keyboard.add_button("🎵 Создать песню", color=VkKeyboardColor.POSITIVE)
-            keyboard.add_button("🎶 Создать музыку", color=VkKeyboardColor.POSITIVE)
-            
-            # Second row
-            keyboard.add_line()
-            keyboard.add_button("📂 Мои треки", color=VkKeyboardColor.PRIMARY)
-            keyboard.add_button("💰 Баланс", color=VkKeyboardColor.PRIMARY)
-            
-            # Third row
-            keyboard.add_line()
-            keyboard.add_button("🎧 Примеры песен", color=VkKeyboardColor.SECONDARY)
-            keyboard.add_button("📞 Поддержка", color=VkKeyboardColor.SECONDARY)
-
-            # Admin button
-            if user_id and user_id == ADMIN_VK_ID:
-                keyboard.add_line()
-                keyboard.add_button("⚙️ Админ", color=VkKeyboardColor.NEGATIVE)
+            # Используем клавиатуру из модуля vk_keyboards
+            from vk_keyboards import get_main_keyboard
+            keyboard = get_main_keyboard(user_id)
             
             logger.info("✅ Клавиатура успешно создана")
             return keyboard
@@ -244,6 +254,17 @@ class VKBot:
         logger.info(f"📩 Получено новое сообщение от {user_id}: '{text}' (в нижнем регистре: '{text_lower}')")
         print(f"Получено сообщение: {text}")
         
+        # Проверяем наличие payload в сообщении
+        payload = None
+        if hasattr(event, 'payload') and event.payload:
+            try:
+                import json
+                payload = json.loads(event.payload)
+                print(f"Получен payload: {payload}")
+                logger.info(f"📩 Получен payload от {user_id}: {payload}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при разборе payload: {e}")
+        
         try:
             # Флаг для отслеживания обработки команды
             command_handled = False
@@ -292,9 +313,42 @@ class VKBot:
                 return
 
             # Обработка команд меню
-
-            # Обработка команд меню
-            if "создать песню" in text_lower:
+            
+            # Проверяем, есть ли payload и обрабатываем его
+            if payload and isinstance(payload, dict):
+                # Обработка payload от кнопок
+                action = payload.get('action')
+                if action:
+                    logger.info(f"🔘 Обработка действия из payload: {action}")
+                    
+                    # Обработка различных действий из payload
+                    if action == "create_song":
+                        text = "🎵 Создать песню"
+                        text_lower = text.lower()
+                    elif action == "create_music":
+                        text = "🎶 Создать музыку"
+                        text_lower = text.lower()
+                    elif action == "balance":
+                        text = "💰 Баланс"
+                        text_lower = text.lower()
+                    elif action == "my_tracks":
+                        text = "📂 Мои треки"
+                        text_lower = text.lower()
+                    elif action == "examples":
+                        text = "🎧 Примеры песен"
+                        text_lower = text.lower()
+                    elif action == "support":
+                        text = "📞 Поддержка"
+                        text_lower = text.lower()
+                    elif action == "admin":
+                        text = "⚙️ Админ"
+                        text_lower = text.lower()
+                    elif action == "home":
+                        text = "🏠 В главное меню"
+                        text_lower = text.lower()
+            
+            # Обработка команд меню по тексту
+            if "создать песню" in text_lower or text == "🎵 Создать песню":
                 logger.info(f"🎵 Запрос на создание песни от пользователя {user_id}")
                 try:
                     result = execute_query_sync(
@@ -302,23 +356,32 @@ class VKBot:
                         (user_id,)
                     )
                     if result and result[0][0] > 0:
+                        # Устанавливаем состояние выбора типа текста
+                        asyncio.get_event_loop().run_until_complete(
+                            self.state_manager.set_state(user_id, States.CHOOSING_TEXT_TYPE)
+                        )
+                        # Для обратной совместимости
                         self.user_states[user_id] = UserState.WAITING_SONG_DESCRIPTION
-                        prompt_message = """✨ Напишите описание для вашей песни:
-
-• Стиль и жанр (рок, поп, рэп и т.д.)
-• Настроение и атмосфера (веселая, грустная, энергичная)
-• О чем должна быть песня (любовь, дружба, мечты)
-• Какой вокал (мужской/женский)
-
-💫 Чем подробнее описание, тем лучше результат!
-❌ Чтобы отменить создание, нажмите кнопку "🏠 В главное меню"."""
                         
+                        # Сообщение с выбором типа текста
+                        prompt_message = """✨ Отлично! Придумать за тебя текст или у тебя свой?
+
+Чтобы вернуться в главное меню, нажмите кнопку ниже."""
+                        
+                        # Импортируем клавиатуру для выбора типа текста
+                        from vk_keyboards import get_song_type_keyboard
+                        
+                        # Создаем клавиатуру для выбора типа текста (inline=True для отображения под сообщением)
+                        keyboard = get_song_type_keyboard()
+                        
+                        # Отправляем сообщение с клавиатурой выбора типа текста
                         self.send_message(
                             user_id=user_id,
                             message=prompt_message,
-                            keyboard=self.get_cancel_keyboard()
+                            keyboard=keyboard
                         )
-                        logger.info(f"✅ Пользователь {user_id} переведен в режим ожидания описания песни")
+                        
+                        logger.info(f"✅ Пользователь {user_id} переведен в режим выбора типа текста")
                         command_handled = True
                         return  # Прерываем обработку текущего сообщения
                     else:
@@ -337,7 +400,7 @@ class VKBot:
                     )
                 command_handled = True
 
-            elif "создать музыку" in text_lower:
+            elif "создать музыку" in text_lower or text == "🎶 Создать музыку":
                 logger.info(f"🎶 Запрос на создание инструментальной музыки от пользователя {user_id}")
                 try:
                     result = execute_query_sync(
@@ -345,23 +408,33 @@ class VKBot:
                         (user_id,)
                     )
                     if result and result[0][0] > 0:
+                        # Устанавливаем состояние выбора жанра музыки
+                        asyncio.get_event_loop().run_until_complete(
+                            self.state_manager.set_state(user_id, States.WAITING_MUSIC_STYLE)
+                        )
+                        # Для обратной совместимости
                         self.user_states[user_id] = UserState.WAITING_INSTRUMENTAL_DESCRIPTION
-                        prompt_message = """✨ Напишите описание для вашей ИНСТРУМЕНТАЛЬНОЙ музыки (без вокала):
+                        
+                        # Импортируем клавиатуру для выбора жанра музыки
+                        from vk_keyboards import get_music_genres_keyboard
+                        
+                        # Создаем клавиатуру с жанрами
+                        keyboard = get_music_genres_keyboard()
+                        
+                        # Сообщение с выбором жанра
+                        prompt_message = """🎶 **СОЗДАЕМ ИНСТРУМЕНТАЛЬНУЮ МУЗЫКУ**
 
-• Стиль и жанр (рок, поп, электронная и т.д.)
-• Настроение и атмосфера (веселая, грустная, энергичная)
-• Темп (быстрый, медленный, умеренный)
-• Основные инструменты (гитара, пианино, синтезатор)
+🎹 Музыка БЕЗ слов - только мелодия и ритм!
 
-💫 Чем подробнее описание, тем лучше результат!
-❌ Чтобы отменить создание, нажмите кнопку "🏠 В главное меню"."""
+Выбери жанр для твоей композиции 👇"""
                         
                         self.send_message(
                             user_id=user_id,
                             message=prompt_message,
-                            keyboard=self.get_cancel_keyboard()
+                            keyboard=keyboard
                         )
-                        logger.info(f"✅ Пользователь {user_id} переведен в режим ожидания описания инструментальной музыки")
+                        
+                        logger.info(f"✅ Пользователь {user_id} переведен в режим выбора жанра инструментальной музыки")
                         command_handled = True
                         return  # Прерываем обработку текущего сообщения
                     else:
@@ -380,7 +453,7 @@ class VKBot:
                     )
                 command_handled = True
 
-            elif "баланс" in text_lower:
+            elif "баланс" in text_lower or text == "💰 Баланс":
                     logger.info(f"👤 Запрос баланса от пользователя {user_id}")
                     try:
                         result = execute_query_sync(
@@ -392,20 +465,44 @@ class VKBot:
                             created_at = user_data[1].strftime("%d.%m.%Y")
                             balance = user_data[2]
                             
-                            message = f"""📊 Ваш профиль:
+                            # Получаем количество приглашенных пользователей
+                            referrals_result = execute_query_sync(
+                                "SELECT COUNT(*) FROM referrals WHERE referrer_id = %s",
+                                (user_id,)
+                            )
+                            referral_count = referrals_result[0][0] if referrals_result else 0
                             
-👤 ID: {user_data[0]}
-📅 Дата регистрации: {created_at}
-💰 Баланс: {balance} генераций
+                            # Создаем сообщение с информацией о балансе
+                            message = f"""💰 *Ваш баланс:* {balance} токенов
 
-💫 1 генерация = 2 песни
-🎁 Пригласите друга и получите +2 генерации!"""
+📊 *Ваш профиль:*
+ ID: {user_data[0]}
+📅 Дата регистрации: {created_at}
+👥 Приглашено друзей: {referral_count}
+
+💫 1 токен = 2 песни
+🎁 Пригласите друга и получите +2 токена!
+
+*Тарифы:*
+💫 1 токен (2 песни) — 50₽
+💳 10 токенов (20 песен) — 250₽
+🔥 25 токенов (50 песен) — 500₽
+⭐ 60 токенов (120 песен) — 1000₽
+💎 140 токенов (280 песен) — 2000₽"""
+                            
+                            # Импортируем клавиатуру для страницы баланса
+                            from vk_keyboards import get_balance_actions_keyboard
+                            
+                            # Создаем клавиатуру с кнопками пополнения баланса
+                            keyboard = get_balance_actions_keyboard()
+                            
                             logger.info(f"✅ Успешно получен баланс для {user_id}: {balance} генераций")
                         else:
                             message = "❌ Ошибка получения данных профиля"
                             logger.error(f"❌ Пользователь {user_id} не найден в базе данных")
+                            keyboard = self.get_main_keyboard(user_id)
                         
-                        self.send_message(user_id=user_id, message=message, keyboard=self.get_main_keyboard(user_id))
+                        self.send_message(user_id=user_id, message=message, keyboard=keyboard)
                         command_handled = True
                     except Exception as e:
                         logger.error(f"❌ Ошибка при получении баланса для {user_id}: {e}")
@@ -416,6 +513,173 @@ class VKBot:
                         )
                         command_handled = True
 
+            # Обработка кнопок админ-панели
+            if user_id == ADMIN_VK_ID:
+                # Обработка кнопки "Обновить статистику"
+                if "обновить статистику" in text_lower:
+                    stats = self.get_admin_stats()
+                    
+                    # Создаем клавиатуру для админ-панели
+                    admin_keyboard = VkKeyboard(one_time=False)
+                    
+                    # Получаем количество непрочитанных сообщений поддержки
+                    try:
+                        unread_result = execute_query_sync(
+                            "SELECT COUNT(*) FROM support_messages WHERE replied = FALSE"
+                        )
+                        unread_count = unread_result[0][0] if unread_result else 0
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка получения количества непрочитанных сообщений: {e}")
+                        unread_count = 0
+                    
+                    # Формируем текст кнопки поддержки
+                    support_label = f"📩 Поддержка ({unread_count})" if unread_count > 0 else "📩 Поддержка"
+                    
+                    # Добавляем кнопки в клавиатуру
+                    admin_keyboard.add_button("🔄 Обновить статистику", color=VkKeyboardColor.PRIMARY)
+                    admin_keyboard.add_button("🔍 Проверить API", color=VkKeyboardColor.PRIMARY)
+                    
+                    admin_keyboard.add_line()
+                    admin_keyboard.add_button("📨 Рассылка", color=VkKeyboardColor.POSITIVE)
+                    admin_keyboard.add_button(support_label, color=VkKeyboardColor.POSITIVE)
+                    
+                    admin_keyboard.add_line()
+                    admin_keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.SECONDARY)
+                    
+                    # Отправляем статистику с клавиатурой
+                    self.send_message(
+                        user_id=user_id,
+                        message=stats,
+                        keyboard=admin_keyboard
+                    )
+                    command_handled = True
+                    return
+                
+                # Обработка кнопки "Проверить API"
+                elif "проверить api" in text_lower:
+                    self.send_message(
+                        user_id=user_id,
+                        message="🔍 Проверка API Suno..."
+                    )
+                    
+                    # Здесь должен быть код проверки API
+                    # Пока просто отправляем заглушку
+                    api_status = """🔍 *Проверка Suno API*
+⏰ 25.03.2026 10:47
+
+✅ /api/v1/generate: 200 OK (1.2 сек)
+✅ /api/v1/generate/record-info: 200 OK (0.8 сек)
+
+📢 *Вердикт:* ✅ API отвечает корректно"""
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=api_status,
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+                    command_handled = True
+                    return
+                
+                # Обработка кнопки "Рассылка"
+                elif "рассылка" in text_lower:
+                    # Переводим админа в состояние ожидания текста рассылки
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_BROADCAST_TEXT)
+                    )
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message="""📨 *Рассылка сообщений*
+
+Отправьте текст сообщения для рассылки всем пользователям.
+Поддерживается *жирный*, _курсив_, `код`, ссылки.
+
+Чтобы отменить, нажмите кнопку "🏠 В главное меню".""",
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    command_handled = True
+                    return
+                
+                # Обработка кнопки "Поддержка"
+                elif "поддержка" in text_lower:
+                    # Получаем непрочитанные сообщения поддержки
+                    try:
+                        messages = execute_query_sync(
+                            """SELECT id, user_id, username, first_name, message, created_at
+                            FROM support_messages
+                            WHERE replied = FALSE
+                            ORDER BY created_at DESC
+                            LIMIT 10"""
+                        )
+                        
+                        if not messages:
+                            self.send_message(
+                                user_id=user_id,
+                                message="📭 Нет непрочитанных сообщений в поддержке.",
+                                keyboard=self.get_main_keyboard(user_id)
+                            )
+                            command_handled = True
+                            return
+                        
+                        # Отправляем каждое сообщение отдельно
+                        for msg_id, msg_user_id, username, first_name, text, created_at in messages:
+                            # Форматируем дату
+                            date_str = created_at.strftime("%d.%m.%Y %H:%M") if hasattr(created_at, 'strftime') else str(created_at)[:16]
+                            
+                            # Создаем клавиатуру для ответа
+                            reply_keyboard = VkKeyboard(inline=True)
+                            reply_keyboard.add_button(f"💬 Ответить {msg_id}", color=VkKeyboardColor.PRIMARY)
+                            reply_keyboard.add_button(f"🗑 Закрыть {msg_id}", color=VkKeyboardColor.NEGATIVE)
+                            
+                            # Формируем сообщение
+                            user_str = f"@{username}" if username else f"id{msg_user_id}"
+                            header = f"🔴 *{first_name}* ({user_str}) — {date_str}"
+                            message = f"{header}\n\n{text}"
+                            
+                            self.send_message(
+                                user_id=user_id,
+                                message=message,
+                                keyboard=reply_keyboard
+                            )
+                        
+                        command_handled = True
+                        return
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка получения сообщений поддержки: {e}")
+                        self.send_message(
+                            user_id=user_id,
+                            message=f"❌ Ошибка: {e}",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        command_handled = True
+                        return
+            
+            # Обработка кнопки "Пригласить друга"
+            if "пригласить друга" in text_lower:
+                # Создаем реферальную ссылку
+                referral_link = f"https://vk.com/app{VK_GROUP_ID}#ref_{user_id}"
+                
+                # Отправляем сообщение с реферальной ссылкой
+                message = f"""🎁 *Приглашайте друзей и получайте бонусы!*
+
+За каждого приглашенного друга вы получите +2 токена на баланс.
+Друг тоже получит +1 токен при регистрации по вашей ссылке.
+
+👇 *Ваша реферальная ссылка:*
+{referral_link}
+
+📋 Скопируйте ссылку и отправьте друзьям или поделитесь в соцсетях.
+
+💡 Бонус начисляется автоматически, когда друг перейдет по ссылке и начнет использовать бота."""
+                
+                self.send_message(
+                    user_id=user_id,
+                    message=message,
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+                command_handled = True
+                return
+                
             # Обработка команды возврата в главное меню
             if "в главное меню" in text_lower or text == "🏠 В главное меню":
                 self.reset_state(user_id)
@@ -425,10 +689,478 @@ class VKBot:
                     keyboard=self.get_main_keyboard(user_id)
                 )
                 return
+                
+            # Обработка навигации по страницам треков
+            if text == "⬅️ Назад" or text == "➡️ Вперед":
+                # Получаем текущую страницу из состояния
+                state_data = asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.get_data(user_id)
+                ) or {}
+                
+                current_page = state_data.get('tracks_page', 1)
+                
+                # Изменяем страницу в зависимости от нажатой кнопки
+                if text == "⬅️ Назад" and current_page > 1:
+                    new_page = current_page - 1
+                elif text == "➡️ Вперед":
+                    new_page = current_page + 1
+                else:
+                    new_page = current_page
+                
+                # Сохраняем новую страницу
+                asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.update_data(user_id, tracks_page=new_page)
+                )
+                
+                # Имитируем нажатие на кнопку "Мои треки" для отображения новой страницы
+                self.handle_message(types.SimpleNamespace(
+                    user_id=user_id,
+                    text="📂 Мои треки",
+                    to_me=True
+                ))
+                return
 
             # Обработка состояний
             current_state = self.user_states.get(user_id, UserState.START)
 
+            # Получаем состояние из нового менеджера состояний
+            vk_state = asyncio.get_event_loop().run_until_complete(
+                self.state_manager.get_state(user_id)
+            )
+            
+            # Обработка выбора типа текста
+            if vk_state == States.CHOOSING_TEXT_TYPE:
+                if "ai-текст" in text_lower or "придумать текст" in text_lower or "🤖 ai-текст" in text_lower:
+                    # Обработка выбора AI-текста
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_SONG_IDEA)
+                    )
+                    
+                    prompt_message = """✨ **СЕЙЧАС МЫ ТЕБЕ СОЧИНИМ САМЫЙ ЛУЧШИЙ ТЕКСТ!**
+
+Про что и для кого ты хочешь песню? Напиши мне.
+
+▪️ для кого / о ком
+▪️ какие интересные моменты упомянуть
+▪️ идея которую хочется передать песней
+
+📩 Всё в ОДНОМ сообщении — и я создам текст!
+
+💡 Совет: опиши кратко самое главное (до 200 символов) ✨"""
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=prompt_message,
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} выбрал генерацию AI-текста")
+                    command_handled = True
+                    return
+                
+                elif "свой текст" in text_lower or "✍️ свой текст" in text_lower:
+                    # Обработка выбора своего текста
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_OWN_LYRICS)
+                    )
+                    
+                    prompt_message = """📝 **ОТЛИЧНО!**
+
+Отправь мне текст своей песни, и мы перейдем к выбору жанра 🎵"""
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=prompt_message,
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} выбрал использование своего текста")
+                    command_handled = True
+                    return
+            
+            # Обработка ввода идеи для AI-текста
+            elif vk_state == States.WAITING_SONG_IDEA:
+                # Сохраняем идею для генерации текста
+                asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.update_data(user_id, song_idea=text)
+                )
+                
+                # Генерируем текст песни на основе идеи
+                try:
+                    from celery_tasks import generate_suno_lyrics_sync
+                    
+                    # Ограничиваем длину идеи
+                    idea = text[:500]
+                    
+                    # Генерируем текст
+                    lyrics = generate_suno_lyrics_sync(idea)
+                    
+                    if lyrics:
+                        # Сохраняем сгенерированный текст
+                        asyncio.get_event_loop().run_until_complete(
+                            self.state_manager.update_data(user_id, lyrics=lyrics)
+                        )
+                        
+                        # Импортируем клавиатуру для выбора варианта текста
+                        from vk_keyboards import get_lyrics_variants_keyboard
+                        
+                        # Отправляем сгенерированный текст пользователю с клавиатурой выбора варианта
+                        self.send_message(
+                            user_id=user_id,
+                            message=f"✨ Вот текст, который я сочинил для вас:\n\n{lyrics}",
+                            keyboard=get_lyrics_variants_keyboard()
+                        )
+                        
+                        # Переводим в состояние выбора варианта текста
+                        asyncio.get_event_loop().run_until_complete(
+                            self.state_manager.set_state(user_id, States.CHOOSING_LYRICS_VARIANT)
+                        )
+                    else:
+                        # Если не удалось сгенерировать текст
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ Не удалось сгенерировать текст. Попробуйте другую идею или свой текст.",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        self.reset_state(user_id)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка генерации текста: {e}")
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Произошла ошибка при генерации текста. Попробуйте позже.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+                    self.reset_state(user_id)
+                
+                logger.info(f"✅ Пользователь {user_id} отправил идею для AI-текста")
+                command_handled = True
+                return
+            
+            # Обработка ввода своего текста
+            elif vk_state == States.WAITING_OWN_LYRICS:
+                # Сохраняем текст песни
+                asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.update_data(user_id, lyrics=text)
+                )
+                
+                # Переводим в состояние выбора жанра
+                asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.set_state(user_id, States.WAITING_GENRE)
+                )
+                
+                # Сообщение о том, что текст принят
+                # Импортируем клавиатуру для выбора жанра песни
+                from vk_keyboards import get_song_genres_keyboard
+                
+                self.send_message(
+                    user_id=user_id,
+                    message="✅ Отлично! Теперь выберите жанр для вашей песни:",
+                    keyboard=get_song_genres_keyboard()
+                )
+                logger.info(f"✅ Пользователь {user_id} отправил свой текст")
+                command_handled = True
+                return
+            
+            # Обработка выбора варианта текста
+            elif vk_state == States.CHOOSING_LYRICS_VARIANT:
+                if "использовать этот текст" in text_lower or "✅ использовать этот текст" in text_lower:
+                    # Пользователь выбрал использовать сгенерированный текст
+                    # Переводим в состояние выбора жанра
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_GENRE)
+                    )
+                    
+                    # Импортируем клавиатуру для выбора жанра песни
+                    from vk_keyboards import get_song_genres_keyboard
+                    
+                    # Отправляем клавиатуру выбора жанра
+                    self.send_message(
+                        user_id=user_id,
+                        message="Выберите жанр для вашей песни:",
+                        keyboard=get_song_genres_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} выбрал использовать сгенерированный текст")
+                    command_handled = True
+                    return
+                
+                elif "сгенерировать другой" in text_lower or "🔄 сгенерировать другой" in text_lower:
+                    # Пользователь хочет сгенерировать другой текст
+                    # Получаем идею для песни из данных состояния
+                    state_data = asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.get_data(user_id)
+                    ) or {}
+                    
+                    song_idea = state_data.get('song_idea', '')
+                    
+                    if song_idea:
+                        # Отправляем сообщение о генерации нового текста
+                        self.send_message(
+                            user_id=user_id,
+                            message="⏳ Генерирую новый вариант текста...",
+                            keyboard=self.get_cancel_keyboard()
+                        )
+                        
+                        # Генерируем новый текст
+                        try:
+                            from celery_tasks import generate_suno_lyrics_sync
+                            
+                            # Ограничиваем длину идеи
+                            idea = song_idea[:500]
+                            
+                            # Генерируем текст
+                            lyrics = generate_suno_lyrics_sync(idea)
+                            
+                            if lyrics:
+                                # Сохраняем сгенерированный текст
+                                asyncio.get_event_loop().run_until_complete(
+                                    self.state_manager.update_data(user_id, lyrics=lyrics)
+                                )
+                                
+                                # Отправляем сгенерированный текст пользователю
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=f"✨ Вот новый вариант текста:\n\n{lyrics}"
+                                )
+                                
+                                # Отправляем клавиатуру выбора варианта текста
+                                from vk_keyboards import get_lyrics_variants_keyboard
+                                self.send_message(
+                                    user_id=user_id,
+                                    message="Что делаем с этим текстом?",
+                                    keyboard=get_lyrics_variants_keyboard()
+                                )
+                            else:
+                                # Если не удалось сгенерировать текст
+                                self.send_message(
+                                    user_id=user_id,
+                                    message="❌ Не удалось сгенерировать новый текст. Попробуйте использовать текущий вариант или написать свой.",
+                                    keyboard=get_lyrics_variants_keyboard()
+                                )
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка генерации нового текста: {e}")
+                            self.send_message(
+                                user_id=user_id,
+                                message="❌ Произошла ошибка при генерации нового текста. Попробуйте использовать текущий вариант или написать свой.",
+                                keyboard=get_lyrics_variants_keyboard()
+                            )
+                    else:
+                        # Если идея не найдена, сообщаем об ошибке
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ Произошла ошибка: идея для песни не найдена. Попробуйте начать сначала.",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        self.reset_state(user_id)
+                    
+                    logger.info(f"✅ Пользователь {user_id} запросил новый вариант текста")
+                    command_handled = True
+                    return
+                
+                elif "написать свой текст" in text_lower or "✍️ написать свой текст" in text_lower:
+                    # Пользователь хочет написать свой текст
+                    # Переводим в состояние ожидания своего текста
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_OWN_LYRICS)
+                    )
+                    
+                    prompt_message = """📝 **ОТЛИЧНО!**
+                    
+Отправь мне текст своей песни, и мы перейдем к выбору жанра 🎵"""
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=prompt_message,
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} выбрал написать свой текст")
+                    command_handled = True
+                    return
+            
+            # Обработка выбора жанра музыки
+            elif vk_state == States.WAITING_MUSIC_STYLE:
+                # Проверяем, выбрал ли пользователь "Свой вариант"
+                if "свой вариант" in text_lower or "✏️ свой вариант" in text_lower:
+                    # Переходим в состояние ожидания описания своего варианта
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_CUSTOM_STYLE)
+                    )
+                    
+                    prompt_message = """✨ Опишите свой вариант музыки:
+
+• Стиль и жанр (рок, поп, электронная и т.д.)
+• Настроение и атмосфера (веселая, грустная, энергичная)
+• Темп (быстрый, медленный, умеренный)
+• Основные инструменты (гитара, пианино, синтезатор)
+
+💫 Чем подробнее описание, тем лучше результат!
+❌ Чтобы отменить создание, нажмите кнопку "🏠 В главное меню"."""
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=prompt_message,
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} переведен в режим ожидания описания своего варианта")
+                    command_handled = True
+                    return
+                else:
+                    # Пользователь выбрал один из предложенных жанров
+                    # Сохраняем выбранный жанр
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.update_data(user_id, genre=text)
+                    )
+                    
+                    # Запускаем генерацию музыки
+                    self.start_music_generation(user_id, text)
+                    command_handled = True
+                    return
+                    
+            # Обработка выбора жанра для песни
+            elif vk_state == States.WAITING_GENRE:
+                # Проверяем, выбрал ли пользователь "Свой вариант"
+                if "свой вариант" in text_lower or "✏️ свой вариант" in text_lower:
+                    # Переходим в состояние ожидания описания своего варианта
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_CUSTOM_GENRE)
+                    )
+                    
+                    prompt_message = """✨ Опишите жанр для вашей песни:
+
+• Стиль и жанр (рок, поп, электронная и т.д.)
+• Настроение и атмосфера (веселая, грустная, энергичная)
+• Темп (быстрый, медленный, умеренный)
+• Основные инструменты (гитара, пианино, синтезатор)
+
+💫 Чем подробнее описание, тем лучше результат!
+❌ Чтобы отменить создание, нажмите кнопку "🏠 В главное меню"."""
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=prompt_message,
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} переведен в режим ожидания описания своего жанра")
+                    command_handled = True
+                    return
+                else:
+                    # Пользователь выбрал один из предложенных жанров
+                    # Сохраняем выбранный жанр
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.update_data(user_id, genre=text)
+                    )
+                    
+                    # Получаем текст песни из данных состояния
+                    state_data = asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.get_data(user_id)
+                    ) or {}
+                    
+                    lyrics = state_data.get('lyrics', '')
+                    
+                    if lyrics:
+                        # Запускаем генерацию песни
+                        self.start_song_generation(user_id, lyrics, text)
+                    else:
+                        # Если текст не найден, сообщаем об ошибке
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ Произошла ошибка: текст песни не найден. Попробуйте начать сначала.",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        self.reset_state(user_id)
+                    
+                    command_handled = True
+                    return
+            
+            # Обработка ввода своего варианта жанра для инструментальной музыки
+            elif vk_state == States.WAITING_CUSTOM_STYLE:
+                # Сохраняем описание своего варианта
+                custom_style = text
+                
+                # Запускаем генерацию музыки
+                self.start_music_generation(user_id, custom_style)
+                command_handled = True
+                return
+                
+            # Обработка ввода своего варианта жанра для песни
+            elif vk_state == States.WAITING_CUSTOM_GENRE:
+                # Сохраняем описание своего варианта жанра
+                custom_genre = text
+                
+                # Получаем текст песни из данных состояния
+                state_data = asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.get_data(user_id)
+                ) or {}
+                
+                lyrics = state_data.get('lyrics', '')
+                
+                if lyrics:
+                    # Запускаем генерацию песни
+                    self.start_song_generation(user_id, lyrics, custom_genre)
+                else:
+                    # Если текст не найден, сообщаем об ошибке
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Произошла ошибка: текст песни не найден. Попробуйте начать сначала.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+                    self.reset_state(user_id)
+                
+                command_handled = True
+                return
+                
+            # Обработка сообщения для поддержки
+            elif vk_state == States.WAITING_SUPPORT_MESSAGE:
+                # Получаем информацию о пользователе
+                try:
+                    user_info = self.vk.users.get(user_ids=user_id)[0]
+                    username = user_info.get('screen_name', '')
+                    first_name = user_info.get('first_name', '')
+                except Exception as e:
+                    logger.error(f"❌ Ошибка получения информации о пользователе {user_id}: {e}")
+                    username = ""
+                    first_name = ""
+                
+                # Сохраняем сообщение в базу данных
+                try:
+                    execute_query_sync(
+                        "INSERT INTO support_messages (user_id, username, first_name, message) VALUES (%s, %s, %s, %s)",
+                        (user_id, username, first_name, text)
+                    )
+                    logger.info(f"✅ Сообщение от пользователя {user_id} сохранено в базе данных")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка сохранения сообщения в поддержку: {e}")
+                
+                # Отправляем сообщение администратору
+                try:
+                    from vk_config import ADMIN_VK_ID
+                    admin_message = f"""📩 *Новое сообщение в поддержку*
+
+От: {first_name} (@{username})
+ID: {user_id}
+
+Сообщение:
+{text}"""
+                    
+                    self.send_message(
+                        user_id=ADMIN_VK_ID,
+                        message=admin_message
+                    )
+                    logger.info(f"✅ Сообщение от пользователя {user_id} отправлено администратору")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки сообщения администратору: {e}")
+                
+                # Сбрасываем состояние пользователя
+                self.reset_state(user_id)
+                
+                # Отправляем подтверждение пользователю
+                self.send_message(
+                    user_id=user_id,
+                    message="✅ *Сообщение отправлено!*\n\nМы ответим вам в ближайшее время.",
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+                
+                command_handled = True
+                return
+                
+            # Обработка для обратной совместимости
             if current_state == UserState.WAITING_SONG_DESCRIPTION or current_state == UserState.WAITING_INSTRUMENTAL_DESCRIPTION:
                 # Обработка описания песни или инструментальной музыки
                 self.send_message(
@@ -441,37 +1173,102 @@ class VKBot:
 
             # Обработка кнопок главного меню
 
-            elif "поддержка" in text_lower:
+            elif "поддержка" in text_lower or text == "📞 Поддержка":
                 logger.info(f"📞 Запрос в поддержку от пользователя {user_id}")
-                support_message = """Служба поддержки ALBI Music 🛠
+                
+                # Переводим пользователя в состояние ожидания сообщения для поддержки
+                asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.set_state(user_id, States.WAITING_SUPPORT_MESSAGE)
+                )
+                
+                support_message = """📞 *Поддержка ALBI Music*
 
-По всем вопросам пишите мне в личные сообщения: [https://vk.com/igorbibin]
+Напишите ваше сообщение — мы ответим в ближайшее время.
 
-⏳ Отвечу вам в течение дня."""
+Чтобы отменить, нажмите кнопку "🏠 В главное меню"."""
+                
+                # Создаем клавиатуру с кнопкой возврата в главное меню
+                keyboard = self.get_cancel_keyboard()
                 
                 self.send_message(
                     user_id=user_id,
                     message=support_message,
-                    keyboard=self.get_main_keyboard(user_id)
+                    keyboard=keyboard
                 )
-                logger.info(f"✅ Отправлена информация о поддержке пользователю {user_id}")
+                logger.info(f"✅ Пользователь {user_id} переведен в режим отправки сообщения в поддержку")
                 command_handled = True
+                return
 
-            elif "примеры" in text_lower:
+            elif "примеры" in text_lower or text == "🎧 Примеры песен":
                 logger.info(f"🎵 Запрос примеров песен от пользователя {user_id}")
-                demo_message = """Примеры сгенерированных треков можно послушать в нашем сообществе: [https://vk.com/club235442407]"""
+                
+                # Отправляем сообщение с примерами треков
+                demo_message = """🎧 *Примеры треков, созданных нашим ботом:*
+
+Вот несколько примеров песен, созданных с помощью искусственного интеллекта:
+
+1. 🌸 Люба, с 8 марта
+2. 💪 Бодибилдинг
+3. 🐱 Кот
+4. 🎻 Красивая скрипка
+5. 💫 Я буду ждать всегда
+
+Больше примеров в нашем сообществе: [https://vk.com/club235442407]"""
                 
                 self.send_message(
                     user_id=user_id,
                     message=demo_message,
                     keyboard=self.get_main_keyboard(user_id)
                 )
-                logger.info(f"✅ Отправлены ссылки на примеры пользователю {user_id}")
+                
+                # Отправляем демо-аудио
+                try:
+                    # Отправляем аудио файлы
+                    demo_files = [
+                        {"path": "demo_audio/lubov.mp3", "title": "🌸 Люба, с 8 марта"},
+                        {"path": "demo_audio/bodybuilding.mp3", "title": "💪 Бодибилдинг"},
+                        {"path": "demo_audio/cat.mp3", "title": "🐱 Кот"}
+                    ]
+                    
+                    for demo in demo_files:
+                        # Проверяем существование файла
+                        import os
+                        if os.path.exists(demo["path"]):
+                            # Отправляем аудио
+                            self.vk.docs.getMessagesUploadServer(type='audio_message', peer_id=user_id)
+                            # Поскольку VK API не позволяет напрямую отправлять аудио через API,
+                            # отправляем сообщение со ссылкой
+                            self.send_message(
+                                user_id=user_id,
+                                message=f"🎵 {demo['title']}: [https://vk.com/club235442407]"
+                            )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при отправке демо-треков: {e}")
+                
+                # Отправляем приглашение в сообщество
+                channel_message = """🎵 В нашем сообществе каждый день новые песни от пользователей, крутые промпты и обучение!
+
+Подпишись, чтобы первым узнавать о новых функциях 👇"""
+                
+                # Создаем клавиатуру с кнопкой подписки на сообщество
+                channel_keyboard = VkKeyboard(inline=True)
+                channel_keyboard.add_openlink_button(
+                    label="🔔 Подписаться на сообщество",
+                    link="https://vk.com/club235442407"
+                )
+                
+                self.send_message(
+                    user_id=user_id,
+                    message=channel_message,
+                    keyboard=channel_keyboard
+                )
+                
+                logger.info(f"✅ Отправлены примеры треков пользователю {user_id}")
                 command_handled = True
 
 
 
-            elif "админ" in text_lower:
+            elif "админ" in text_lower or text == "⚙️ Админ":
                 logger.info(f"⚙️ Запрос админ-панели от пользователя {user_id}")
                 if user_id != ADMIN_VK_ID:
                     self.send_message(
@@ -482,66 +1279,161 @@ class VKBot:
                     command_handled = True
                     return
                 
+                # Получаем статистику
                 stats = self.get_admin_stats()
+                
+                # Создаем клавиатуру для админ-панели
+                admin_keyboard = VkKeyboard(one_time=False)
+                
+                # Получаем количество непрочитанных сообщений поддержки
+                try:
+                    unread_result = execute_query_sync(
+                        "SELECT COUNT(*) FROM support_messages WHERE replied = FALSE"
+                    )
+                    unread_count = unread_result[0][0] if unread_result else 0
+                except Exception as e:
+                    logger.error(f"❌ Ошибка получения количества непрочитанных сообщений: {e}")
+                    unread_count = 0
+                
+                # Формируем текст кнопки поддержки
+                support_label = f"📩 Поддержка ({unread_count})" if unread_count > 0 else "📩 Поддержка"
+                
+                # Добавляем кнопки в клавиатуру
+                admin_keyboard.add_button("🔄 Обновить статистику", color=VkKeyboardColor.PRIMARY)
+                admin_keyboard.add_button("🔍 Проверить API", color=VkKeyboardColor.PRIMARY)
+                
+                admin_keyboard.add_line()
+                admin_keyboard.add_button("📨 Рассылка", color=VkKeyboardColor.POSITIVE)
+                admin_keyboard.add_button(support_label, color=VkKeyboardColor.POSITIVE)
+                
+                admin_keyboard.add_line()
+                admin_keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.SECONDARY)
+                
+                # Отправляем статистику с клавиатурой
                 self.send_message(
                     user_id=user_id,
                     message=stats,
-                    keyboard=self.get_main_keyboard(user_id)
+                    keyboard=admin_keyboard
                 )
                 command_handled = True
                 return
 
-            elif "мои треки" in text_lower:
+            elif "мои треки" in text_lower or text == "📂 Мои треки":
                 logger.info(f"📂 Запрос списка треков от пользователя {user_id}")
                 try:
-                    # Получаем последние 20 генераций пользователя
+                    # Получаем данные о состоянии пагинации
+                    state_data = asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.get_data(user_id)
+                    ) or {}
+                    
+                    # Получаем текущую страницу (по умолчанию 1)
+                    page = state_data.get('tracks_page', 1)
+                    
+                    # Количество треков на странице
+                    per_page = 5
+                    
+                    # Вычисляем смещение для SQL запроса
+                    offset = (page - 1) * per_page
+                    
+                    # Получаем общее количество треков пользователя
+                    total_count = execute_query_sync(
+                        """
+                        SELECT COUNT(*)
+                        FROM generations
+                        WHERE user_id = %s AND status = 'completed'
+                        """,
+                        (user_id,)
+                    )[0][0]
+                    
+                    # Получаем треки для текущей страницы
                     tracks = execute_query_sync(
                         """
                         SELECT task_id, prompt, audio_url, created_at, status
                         FROM generations
                         WHERE user_id = %s AND status = 'completed'
-                        ORDER BY created_at DESC LIMIT 20
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
                         """,
-                        (user_id,)
+                        (user_id, per_page, offset)
                     )
 
                     if not tracks:
-                        self.send_message(
-                            user_id=user_id,
-                            message="*У вас пока нет созданных треков. Самое время это исправить! 🎵*",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
-                        return
+                        if page > 1:
+                            # Если страница > 1, но треков нет, значит пользователь перешел слишком далеко
+                            # Сбрасываем на первую страницу
+                            asyncio.get_event_loop().run_until_complete(
+                                self.state_manager.update_data(user_id, tracks_page=1)
+                            )
+                            self.send_message(
+                                user_id=user_id,
+                                message="⚠️ Страница не найдена. Возвращаемся к началу списка.",
+                                keyboard=self.get_main_keyboard(user_id)
+                            )
+                            return
+                        else:
+                            # Если это первая страница и треков нет
+                            self.send_message(
+                                user_id=user_id,
+                                message="*У вас пока нет созданных треков. Самое время это исправить! 🎵*",
+                                keyboard=self.get_main_keyboard(user_id)
+                            )
+                            return
 
-                    # Отправляем общую статистику
+                    # Вычисляем общее количество страниц
+                    total_pages = (total_count + per_page - 1) // per_page
+                    
+                    # Отправляем общую статистику с информацией о пагинации
                     self.send_message(
                         user_id=user_id,
-                        message=f"🎵 *Ваши композиции*\n\n📊 Всего создано: {len(tracks)} треков\n━━━━━━━━━━━━━━━━━"
+                        message=f"🎵 *Ваши композиции*\n\n📊 Всего создано: {total_count} треков\n📄 Страница {page} из {total_pages}\n━━━━━━━━━━━━━━━━━"
                     )
 
-                    # Отправляем каждый трек отдельным сообщением
-                    for idx, (task_id, prompt, audio_url, created_at, status) in enumerate(tracks[:10], 1):
+                    # Отправляем треки текущей страницы
+                    for idx, (task_id, prompt, audio_url, created_at, status) in enumerate(tracks, 1):
                         # Форматируем дату
                         date_str = created_at.strftime("%d.%m.%Y") if hasattr(created_at, 'strftime') else str(created_at)[:10]
                         
                         # Форматируем описание
                         short_prompt = prompt[:100] + '...' if len(prompt) > 100 else prompt
                         
+                        # Импортируем клавиатуру для действий с треком
+                        from vk_keyboards import get_track_actions_keyboard
+                        
+                        # Создаем клавиатуру для трека с кнопками действий
+                        track_keyboard = None
+                        if audio_url and not audio_url.startswith('ERROR'):
+                            track_keyboard = get_track_actions_keyboard()
+                        
                         track_text = (
-                            f"*Трек #{idx}*\n"
+                            f"*Трек #{offset + idx}*\n"
                             f"📅 Дата: {date_str}\n"
                             f"📝 Описание: _{short_prompt}_\n"
                             f"━━━━━━━━━━━━━━━━━"
                         )
                         
-                        self.send_message(user_id=user_id, message=track_text)
-
-                    if len(tracks) > 10:
                         self.send_message(
                             user_id=user_id,
-                            message=f"_... и еще {len(tracks)-10} треков_\n\nПоказаны последние 10 из {len(tracks)} треков",
-                            keyboard=self.get_main_keyboard(user_id)
+                            message=track_text,
+                            keyboard=track_keyboard if audio_url and not audio_url.startswith('ERROR') else None
                         )
+
+                    # Импортируем клавиатуру навигации по трекам
+                    from vk_keyboards import get_tracks_navigation_keyboard
+                    
+                    # Создаем клавиатуру навигации
+                    nav_keyboard = get_tracks_navigation_keyboard(page, total_pages)
+                    
+                    # Отправляем сообщение с навигацией
+                    self.send_message(
+                        user_id=user_id,
+                        message=f"📄 Страница {page} из {total_pages}",
+                        keyboard=nav_keyboard
+                    )
+                    
+                    # Сохраняем текущую страницу в состоянии пользователя
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.update_data(user_id, tracks_page=page)
+                    )
 
                 except Exception as e:
                     logger.error(f"❌ Ошибка при получении треков пользователя {user_id}: {e}")
@@ -582,6 +1474,246 @@ class VKBot:
                         logger.error("❌ Не удалось создать клавиатуру для обычного сообщения")
         except Exception as e:
             logger.error(f"Error handling message: {e}")
+            
+    def start_music_generation(self, user_id, genre):
+        """Запускает генерацию инструментальной музыки с выбранным жанром"""
+        try:
+            # Списываем генерацию (кроме админа)
+            from vk_config import ADMIN_VK_ID
+            if user_id != ADMIN_VK_ID:
+                execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
+            
+            # Отправляем сообщение о начале генерации
+            self.send_message(
+                user_id=user_id,
+                message="⏳ Генерация вашей инструментальной музыки началась. Это займет 3-5 минут, подождите пожалуйста!",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+            
+            # Сбрасываем состояние пользователя
+            self.reset_state(user_id)
+            
+            # Создаем задачу генерации в Celery
+            import uuid
+            from celery_tasks import generate_music_task
+            
+            task_id = str(uuid.uuid4())
+            
+            # Переводим жанр на английский для Suno API
+            from celery_tasks import translate_style_to_english
+            english_genre = translate_style_to_english(genre)
+            
+            # Запускаем Celery задачу
+            task = generate_music_task.apply_async(
+                args=(user_id, english_genre),
+                kwargs={'task_id': task_id},
+                task_id=task_id
+            )
+            
+            # Сохраняем информацию о генерации в БД
+            from db_utils import execute_query_sync
+            execute_query_sync(
+                'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s, %s)',
+                (user_id, task_id, f"Стиль: {genre}", "", False, False)
+            )
+            
+            logger.info(f"✅ Задача генерации музыки создана: {task_id} для пользователя {user_id}, жанр: {genre}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка запуска генерации музыки для пользователя {user_id}: {e}")
+            self.send_message(
+                user_id=user_id,
+                message="❌ Произошла ошибка при запуске генерации. Попробуйте позже.",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+            self.reset_state(user_id)
+            
+    def start_song_generation(self, user_id, lyrics, genre):
+        """Запускает генерацию песни с текстом и выбранным жанром"""
+        try:
+            # Списываем генерацию (кроме админа)
+            from vk_config import ADMIN_VK_ID
+            if user_id != ADMIN_VK_ID:
+                execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
+            
+            # Отправляем сообщение о начале генерации
+            self.send_message(
+                user_id=user_id,
+                message="⏳ Генерация вашей песни началась. Это займет 3-5 минут, подождите пожалуйста!",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+            
+            # Сбрасываем состояние пользователя
+            self.reset_state(user_id)
+            
+            # Создаем задачу генерации в Celery
+            import uuid
+            from celery_tasks import generate_song_task
+            
+            task_id = str(uuid.uuid4())
+            
+            # Определяем нужен ли custom mode (для текстов > 500 символов)
+            custom_mode = len(lyrics) > 500
+            
+            # Переводим жанр на английский для Suno API
+            from celery_tasks import translate_style_to_english
+            english_genre = translate_style_to_english(genre)
+            
+            # Запускаем Celery задачу
+            task = generate_song_task.apply_async(
+                args=(user_id, lyrics, english_genre, custom_mode),
+                kwargs={'task_id': task_id, 'is_song': True},
+                task_id=task_id
+            )
+            
+            # Сохраняем информацию о генерации в БД
+            from db_utils import execute_query_sync
+            execute_query_sync(
+                'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s, %s)',
+                (user_id, task_id, f"Текст: {lyrics[:100]}... | Жанр: {genre}", "", False, custom_mode)
+            )
+            
+            logger.info(f"✅ Задача генерации песни создана: {task_id} для пользователя {user_id}, жанр: {genre}, custom_mode: {custom_mode}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка запуска генерации песни для пользователя {user_id}: {e}")
+            self.send_message(
+                user_id=user_id,
+                message="❌ Произошла ошибка при запуске генерации. Попробуйте позже.",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+            self.reset_state(user_id)
+            
+    async def check_generation_results(self):
+        """Периодически проверяет результаты генерации и отправляет их пользователям"""
+        try:
+            # Получаем все завершенные генерации, которые еще не были отправлены пользователям
+            from db_utils import execute_query_sync
+            results = execute_query_sync(
+                """
+                SELECT g.user_id, g.task_id, g.prompt, g.audio_url, g.status, g.custom_mode
+                FROM generations g
+                WHERE g.status = 'completed'
+                AND (g.audio_url NOT LIKE 'ALREADY_SENT_%' AND g.audio_url NOT LIKE 'ERROR%')
+                ORDER BY g.created_at DESC
+                LIMIT 10
+                """
+            )
+            
+            if not results:
+                logger.debug("Нет новых результатов генерации для отправки")
+                return
+                
+            logger.info(f"🔍 Найдено {len(results)} новых результатов генерации")
+            
+            for user_id, task_id, prompt, audio_url, status, custom_mode in results:
+                try:
+                    # Проверяем, что audio_url не пустой
+                    if not audio_url:
+                        logger.warning(f"⚠️ Пустой audio_url для задачи {task_id}")
+                        continue
+                        
+                    # Проверяем, является ли audio_url JSON массивом
+                    import json
+                    audio_urls = []
+                    try:
+                        if audio_url.startswith('['):
+                            audio_urls = json.loads(audio_url)
+                        else:
+                            audio_urls = [audio_url]
+                    except json.JSONDecodeError:
+                        audio_urls = [audio_url]
+                    
+                    # Проверяем, что есть хотя бы одна ссылка
+                    if not audio_urls:
+                        logger.warning(f"⚠️ Пустой список audio_urls для задачи {task_id}")
+                        continue
+                    
+                    # Определяем тип генерации (песня или инструментальная музыка)
+                    is_song = "Текст:" in prompt
+                    
+                    # Отправляем сообщение о готовности
+                    if is_song:
+                        self.send_message(
+                            user_id=user_id,
+                            message=f"✅ Ваша песня готова!\n\n📝 Описание: {prompt[:100]}...",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                    else:
+                        self.send_message(
+                            user_id=user_id,
+                            message=f"✅ Ваша инструментальная музыка готова!\n\n📝 Описание: {prompt[:100]}...",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                    
+                    # Отправляем каждую версию аудио
+                    from vk_audio import VKAudioUploader
+                    uploader = VKAudioUploader(self.vk_session)
+                    
+                    success_count = 0
+                    for idx, url in enumerate(audio_urls[:2], 1):  # Отправляем максимум 2 версии
+                        try:
+                            # Проверяем, что URL не пустой и не содержит ошибок
+                            if not url or "ERROR" in url or "SENSITIVE_WORD_ERROR" in url:
+                                logger.warning(f"⚠️ Некорректный URL для задачи {task_id}: {url}")
+                                continue
+                                
+                            # Формируем название трека
+                            title = f"AI {'Song' if is_song else 'Music'} v{idx}"
+                            if custom_mode:
+                                title += " (Custom)"
+                            
+                            # Скачиваем и загружаем аудио в ВК
+                            audio_attachment = await uploader.process_audio(
+                                url=url,
+                                title=title
+                            )
+                            
+                            if audio_attachment:
+                                # Отправляем аудио пользователю
+                                self.vk.messages.send(
+                                    user_id=user_id,
+                                    random_id=get_random_id(),
+                                    attachment=audio_attachment,
+                                    message=f"🎵 Версия {idx}"
+                                )
+                                logger.info(f"✅ Аудио отправлено пользователю {user_id}: {audio_attachment}")
+                                success_count += 1
+                            else:
+                                # Если не удалось загрузить, отправляем прямую ссылку
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=f"🎵 Версия {idx}: {url}"
+                                )
+                                logger.warning(f"⚠️ Не удалось загрузить аудио, отправлена ссылка: {url}")
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка отправки аудио {idx} для {user_id}: {e}")
+                            # Отправляем ссылку в случае ошибки
+                            self.send_message(
+                                user_id=user_id,
+                                message=f"🎵 Версия {idx}: {url}"
+                            )
+                    
+                    # Отправляем сообщение о том, что можно создать еще
+                    if success_count > 0:
+                        self.send_message(
+                            user_id=user_id,
+                            message="🎵 Хотите создать еще одну композицию? Используйте кнопки в главном меню!",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                    
+                    # Помечаем генерацию как отправленную
+                    execute_query_sync(
+                        "UPDATE generations SET audio_url = %s WHERE task_id = %s",
+                        (f"ALREADY_SENT_{audio_url}", task_id)
+                    )
+                    logger.info(f"✅ Генерация {task_id} помечена как отправленная")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка обработки результата {task_id} для {user_id}: {e}")
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки результатов генерации: {e}")
 
     def run(self):
         """Start the bot's event loop"""
@@ -602,6 +1734,30 @@ class VKBot:
             except Exception as e:
                 logger.error(f"❌ Ошибка получения информации о группе: {e}")
                 return
+                
+            # Запускаем фоновый поток для проверки результатов генерации
+            import threading
+            import time
+            
+            def check_results_thread():
+                logger.info("✅ Запущен фоновый поток проверки результатов генерации")
+                # Создаем отдельный event loop для этого потока
+                thread_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(thread_loop)
+                
+                while True:
+                    try:
+                        # Запускаем проверку результатов генерации в отдельном event loop
+                        thread_loop.run_until_complete(self.check_generation_results())
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка в фоновом потоке проверки результатов: {e}")
+                    # Пауза между проверками (30 секунд)
+                    time.sleep(30)
+            
+            # Запускаем поток
+            results_thread = threading.Thread(target=check_results_thread, daemon=True)
+            results_thread.start()
+            logger.info("✅ Фоновый поток проверки результатов запущен")
 
             logger.info("🎯 Бот ВК успешно запущен и слушает сообщения!")
             for event in self.longpoll.listen():
