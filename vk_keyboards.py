@@ -240,19 +240,78 @@ def get_lyrics_variants_selection_keyboard():
     return keyboard
 
 def get_song_options_keyboard(task_id):
-    """Клавиатура с опциями для готовой песни"""
+    """Клавиатура с опциями для готовой песни (callback-кнопки с payload)"""
+    import json
     keyboard = VkKeyboard(inline=True)
-    
-    keyboard.add_button('🎤 Минусовка (1 токен)', color=VkKeyboardColor.PRIMARY)
+
+    keyboard.add_callback_button(
+        '🎤 Минусовка (1 токен)',
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": "karaoke", "task_id": str(task_id)})
+    )
     keyboard.add_line()
-    keyboard.add_button('🎸 Кавер (1 токен)', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_callback_button(
+        '🎸 Кавер (1 токен)',
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": "cover", "task_id": str(task_id)})
+    )
     keyboard.add_line()
-    keyboard.add_button('🎵 В WAV (2 токена)', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_callback_button(
+        '🎵 В WAV (2 токена)',
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": "wav", "task_id": str(task_id)})
+    )
     keyboard.add_line()
-    keyboard.add_button('📢 Отправить в канал', color=VkKeyboardColor.SECONDARY)
-    keyboard.add_line()
-    keyboard.add_button('🔗 Поделиться', color=VkKeyboardColor.POSITIVE)
-    
+    keyboard.add_callback_button(
+        '🔗 Поделиться',
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "share", "task_id": str(task_id)})
+    )
+
+    return keyboard
+
+
+def get_cover_genre_keyboard(task_id):
+    """Клавиатура выбора жанра для кавера (callback-кнопки с payload)"""
+    import json
+    keyboard = VkKeyboard(inline=True)
+
+    genres = [
+        ("🎤 Поп", "Поп"),
+        ("🎸 Рок", "Рок"),
+        ("🎷 Джаз", "Джаз"),
+        ("🎺 Блюз", "Блюз"),
+        ("🎧 Хип-хоп", "Хип-хоп"),
+        ("🎹 Электронная", "Электронная"),
+        ("🎻 Классика", "Классика"),
+        ("🎤 R&B", "R&B"),
+        ("🥁 Регги", "Регги"),
+        ("🎸 Кантри", "Кантри"),
+        ("🎸 Метал", "Метал"),
+        ("🪕 Фолк", "Фолк"),
+        ("🎸 Панк", "Панк"),
+        ("🎷 Фанк", "Фанк"),
+        ("🎤 Шансон", "Шансон"),
+        ("✍️ Другой", "Другой"),
+    ]
+
+    for i in range(0, len(genres), 2):
+        if i > 0:
+            keyboard.add_line()
+        label1, genre1 = genres[i]
+        keyboard.add_callback_button(
+            label1,
+            color=VkKeyboardColor.PRIMARY,
+            payload=json.dumps({"action": "cover_genre", "task_id": str(task_id), "genre": genre1})
+        )
+        if i + 1 < len(genres):
+            label2, genre2 = genres[i + 1]
+            keyboard.add_callback_button(
+                label2,
+                color=VkKeyboardColor.PRIMARY,
+                payload=json.dumps({"action": "cover_genre", "task_id": str(task_id), "genre": genre2})
+            )
+
     return keyboard
 
 def get_vocal_gender_keyboard():
