@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-AlBi Music Web API
+AlBi Music Web API - v2.0
 FastAPI backend для веб-версии с OAuth авторизацией (VK + Yandex)
 Порт: 8001
+
+НОВЫЕ ВОЗМОЖНОСТИ v2.0:
+- Демо-система (45 сек демо → разблокировка за токен)
+- YooKassa платежи с idempotency защитой
+- Реферальная программа (+2 токена за друга, +5 за 5-го)
+- Rate limiting и атомарное списание токенов
+- Кросс-платформенная авторизация (Telegram/Yandex/VK)
 """
 
 import os
@@ -10,6 +17,7 @@ import logging
 import secrets
 import hashlib
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from urllib.parse import urlencode
@@ -24,20 +32,39 @@ from pydantic import BaseModel
 
 import config
 from db_utils import execute_query_sync, init_db_pool_sync
-from celery_tasks import (
-    generate_music_task,
-    generate_song_task,
-    generate_suno_lyrics_sync,
-    generate_karaoke_task,
-    generate_cover_task
-)
 
-# Настройка логирования
+# Настройка логирования (инициализация ПЕРЕД импортами)
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Импорт Celery задач (опциональный для совместимости)
+try:
+    from celery_tasks import (
+        generate_suno_music_sync,
+        generate_suno_song_sync,
+        generate_suno_lyrics_sync
+    )
+    # Алиасы для обратной совместимости
+    generate_music_task = generate_suno_music_sync
+    generate_song_task = generate_suno_song_sync
+    CELERY_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"⚠️ Celery tasks import failed: {e}. Generation endpoints will not work.")
+    CELERY_AVAILABLE = False
+    generate_music_task = None
+    generate_song_task = None
+    generate_suno_lyrics_sync = None
+
+# Импорт YooKassa (установить: pip install yookassa)
+try:
+    from yookassa import Configuration, Payment as YooKassaPayment
+    YOOKASSA_AVAILABLE = True
+except ImportError:
+    logger.warning("⚠️ YooKassa library not installed. Payments will not work.")
+    YOOKASSA_AVAILABLE = False
 
 # Инициализация FastAPI
 app = FastAPI(
@@ -135,6 +162,9 @@ class VKIDAuthRequest(BaseModel):
     access_token: str
     user_id: int
     expires_in: int
+
+class ReferralLinkRequest(BaseModel):
+    pass  # Не требует параметров, генерируется на основе user_id
 
 
 
@@ -508,65 +538,81 @@ async def get_user_balance(user_id: int = Depends(get_current_user)):
 
 @app.post("/api/generate/music")
 async def generate_music(request: GenerateMusicRequest, user_id: int = Depends(get_current_user)):
-    """Генерация инструментальной музыки"""
+    """
+    Генерация инструментальной музыки
+    Использует атомарное списание токенов через PostgreSQL функцию
+    """
     try:
-        # Проверяем баланс (кроме админа)
+        # Проверяем rate limit
+        rate_check = execute_query_sync(
+            "SELECT check_rate_limit(%s, %s, %s, %s)",
+            (user_id, 'generate_music', 5, 1)
+        )
+        
+        if not (rate_check and rate_check[0][0]):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait.")
+        
+        # Атомарно списываем токен и начинаем генерацию
+        # (проверяет баланс, списывает токен, увеличивает счетчик активных генераций)
         if user_id != config.ADMIN_ID:
-            balance_result = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
-            balance = balance_result[0][0] if balance_result else 0
-
-            if balance <= 0:
-                raise HTTPException(status_code=402, detail="Insufficient balance")
-
-            # Списываем 1 генерацию
-            execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
-
+            deduct_result = execute_query_sync(
+                "SELECT start_generation_safe(%s, %s, %s)",
+                (user_id, 1, 3)  # cost=1, max_concurrent=3
+            )
+            
+            if not (deduct_result and deduct_result[0][0]):
+                raise HTTPException(status_code=402, detail="Insufficient balance or too many active generations")
+        
         # Запускаем Celery задачу
         task = generate_music_task.delay(user_id, request.style)
-
+        
         logger.info(f"✅ Music generation started: user={user_id}, task={task.id}")
-
+        
         return JSONResponse({
             "task_id": task.id,
             "status": "pending",
             "message": "Генерация началась. Ожидайте результат."
         })
-
+    
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Error generating music: {e}")
+        # Возвращаем токен при ошибке
+        if user_id != config.ADMIN_ID:
+            execute_query_sync("SELECT refund_tokens(%s, %s, %s)", (user_id, 1, f"Generation error: {str(e)}"))
         raise HTTPException(status_code=500, detail="Generation failed")
 
 
 @app.post("/api/generate/lyrics")
 async def generate_lyrics(request: GenerateLyricsRequest, user_id: int = Depends(get_current_user)):
-    """Генерация текста песни через AI"""
+    """
+    Генерация текста песни через AI (бесплатно, без списания токенов)
+    Используется как помощник перед генерацией песни
+    """
     try:
-        # Проверяем баланс
-        if user_id != config.ADMIN_ID:
-            balance_result = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
-            balance = balance_result[0][0] if balance_result else 0
-
-            if balance <= 0:
-                raise HTTPException(status_code=402, detail="Insufficient balance")
-
-            # Списываем 1 генерацию
-            execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
-
-        # Генерируем текст синхронно
+        # Rate limit для защиты от спама
+        rate_check = execute_query_sync(
+            "SELECT check_rate_limit(%s, %s, %s, %s)",
+            (user_id, 'generate_lyrics', 10, 1)  # 10 запросов в минуту
+        )
+        
+        if not (rate_check and rate_check[0][0]):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait.")
+        
+        # Генерируем текст синхронно (БЕЗ списания токенов)
         lyrics = generate_suno_lyrics_sync(request.idea[:200])
-
+        
         if not lyrics:
             raise HTTPException(status_code=500, detail="Failed to generate lyrics")
-
+        
         logger.info(f"✅ Lyrics generated: user={user_id}, length={len(lyrics)}")
-
+        
         return JSONResponse({
             "lyrics": lyrics,
             "idea": request.idea
         })
-
+    
     except HTTPException:
         raise
     except Exception as e:
@@ -576,37 +622,52 @@ async def generate_lyrics(request: GenerateLyricsRequest, user_id: int = Depends
 
 @app.post("/api/generate/song")
 async def generate_song(request: GenerateSongRequest, user_id: int = Depends(get_current_user)):
-    """Генерация песни с текстом"""
+    """
+    Генерация песни с текстом
+    Использует атомарное списание токенов и rate limiting
+    """
     try:
-        # Проверяем баланс
+        # Проверяем rate limit
+        rate_check = execute_query_sync(
+            "SELECT check_rate_limit(%s, %s, %s, %s)",
+            (user_id, 'generate_song', 5, 1)
+        )
+        
+        if not (rate_check and rate_check[0][0]):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait.")
+        
+        # Атомарно списываем токен
         if user_id != config.ADMIN_ID:
-            balance_result = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
-            balance = balance_result[0][0] if balance_result else 0
-
-            if balance <= 0:
-                raise HTTPException(status_code=402, detail="Insufficient balance")
-
-            # Списываем 1 генерацию
-            execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
-
+            deduct_result = execute_query_sync(
+                "SELECT start_generation_safe(%s, %s, %s)",
+                (user_id, 1, 3)
+            )
+            
+            if not (deduct_result and deduct_result[0][0]):
+                raise HTTPException(status_code=402, detail="Insufficient balance or too many active generations")
+        
         # Определяем custom_mode
         custom_mode = len(request.lyrics) > 500
-
+        
         # Запускаем Celery задачу
         task = generate_song_task.delay(user_id, request.lyrics, request.genre, custom_mode)
-
+        
         logger.info(f"✅ Song generation started: user={user_id}, task={task.id}, custom={custom_mode}")
-
+        
         return JSONResponse({
             "task_id": task.id,
             "status": "pending",
-            "message": "Генерация началась. Ожидайте результат."
+            "message": "Генерация началась. Ожидайте результат.",
+            "custom_mode": custom_mode
         })
-
+    
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Error generating song: {e}")
+        # Возвращаем токен при ошибке
+        if user_id != config.ADMIN_ID:
+            execute_query_sync("SELECT refund_tokens(%s, %s, %s)", (user_id, 1, f"Generation error: {str(e)}"))
         raise HTTPException(status_code=500, detail="Generation failed")
 
 
@@ -709,14 +770,484 @@ async def get_user_history(user_id: int = Depends(get_current_user), limit: int 
 
 
 # ========================
-# Payment endpoints (TODO)
+# Unlock Track endpoint (DEMO → FULL)
 # ========================
 
+@app.post("/api/unlock/{task_id}")
+async def unlock_track(task_id: str, user_id: int = Depends(get_current_user)):
+    """
+    Разблокировать полные версии трека (из демо 45 сек)
+    Списывает 1 токен атомарно через PostgreSQL функцию
+    """
+    try:
+        # Проверяем, существует ли трек и принадлежит ли он пользователю
+        track_check = execute_query_sync(
+            """
+            SELECT audio_url, status FROM generations
+            WHERE task_id = %s AND user_id = %s
+            """,
+            (task_id, user_id)
+        )
+        
+        if not track_check:
+            raise HTTPException(status_code=404, detail="Track not found")
+        
+        audio_url, status = track_check[0]
+        
+        if status != "completed":
+            raise HTTPException(status_code=400, detail="Track is not ready yet")
+        
+        # Проверяем demo_tracks: уже разблокирован или нет
+        demo_check = execute_query_sync(
+            """
+            SELECT is_unlocked, full_url_1, full_url_2
+            FROM demo_tracks
+            WHERE task_id = %s AND user_id = %s
+            """,
+            (task_id, user_id)
+        )
+        
+        if demo_check:
+            is_unlocked, full_url_1, full_url_2 = demo_check[0]
+            
+            if is_unlocked:
+                # Уже разблокирован
+                return JSONResponse({
+                    "success": True,
+                    "message": "Track already unlocked",
+                    "audio_urls": [full_url_1, full_url_2]
+                })
+        
+        # Атомарно списываем 1 токен через PostgreSQL функцию
+        deduct_result = execute_query_sync(
+            "SELECT deduct_tokens_atomic(%s, %s, %s)",
+            (user_id, 1, 'unlock_track')
+        )
+        
+        if not deduct_result or not deduct_result[0][0]:
+            raise HTTPException(status_code=402, detail="Insufficient balance")
+        
+        # Обновляем demo_tracks - помечаем как разблокированный
+        execute_query_sync(
+            """
+            UPDATE demo_tracks
+            SET is_unlocked = TRUE,
+                unlocked_at = CURRENT_TIMESTAMP
+            WHERE task_id = %s AND user_id = %s
+            """,
+            (task_id, user_id)
+        )
+        
+        # Получаем полные URL
+        full_urls_result = execute_query_sync(
+            """
+            SELECT full_url_1, full_url_2
+            FROM demo_tracks
+            WHERE task_id = %s AND user_id = %s
+            """,
+            (task_id, user_id)
+        )
+        
+        if full_urls_result:
+            full_url_1, full_url_2 = full_urls_result[0]
+            
+            logger.info(f"✅ Track unlocked: user={user_id}, task={task_id}")
+            
+            return JSONResponse({
+                "success": True,
+                "message": "Track unlocked successfully",
+                "audio_urls": [full_url_1, full_url_2],
+                "tokens_spent": 1
+            })
+        else:
+            raise HTTPException(status_code=500, detail="Failed to retrieve full tracks")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error unlocking track: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ========================
+# Payment endpoints (YooKassa integration)
+# ========================
+
+class CreatePaymentRequest(BaseModel):
+    amount: float  # Сумма в рублях (50, 250, 500, 1000, 2000)
+
+class PaymentWebhookEvent(BaseModel):
+    type: str
+    event: str
+    object: Dict[str, Any]
+
+
+@app.get("/api/pricing")
+async def get_pricing():
+    """Получить тарифные планы"""
+    try:
+        result = execute_query_sync(
+            """
+            SELECT amount, tokens, currency
+            FROM pricing_plans
+            WHERE is_active = TRUE
+            ORDER BY amount ASC
+            """
+        )
+        
+        plans = []
+        for row in result:
+            amount, tokens, currency = row
+            plans.append({
+                "amount": float(amount),
+                "tokens": tokens,
+                "currency": currency
+            })
+        
+        return JSONResponse({"plans": plans})
+    
+    except Exception as e:
+        logger.error(f"❌ Error getting pricing: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
 @app.post("/api/payment/create")
-async def create_payment(amount: int, user_id: int = Depends(get_current_user)):
-    """Создать платеж через YooKassa (TODO: интеграция)"""
-    # TODO: Интеграция с YooKassa (скопировать логику из main_with_payments.py)
-    raise HTTPException(status_code=501, detail="Payment integration in progress")
+async def create_payment(request: CreatePaymentRequest, user_id: int = Depends(get_current_user)):
+    """Создать платеж через YooKassa"""
+    try:
+        from yookassa import Configuration, Payment as YooKassaPayment
+        import uuid
+        
+        # Настраиваем YooKassa
+        Configuration.account_id = config.YOOKASSA_SHOP_ID
+        Configuration.secret_key = config.YOOKASSA_SECRET_KEY
+        
+        # Определяем количество токенов по сумме
+        pricing_map = {
+            50: 1,
+            250: 10,
+            500: 25,
+            1000: 60,
+            2000: 140
+        }
+        
+        tokens_amount = pricing_map.get(int(request.amount))
+        if not tokens_amount:
+            raise HTTPException(status_code=400, detail="Invalid payment amount")
+        
+        # Создаем idempotency key
+        idempotency_key = str(uuid.uuid4())
+        
+        # Создаем платеж в YooKassa
+        payment = YooKassaPayment.create({
+            "amount": {
+                "value": f"{request.amount:.2f}",
+                "currency": "RUB"
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": "https://albi-music.ru/app/?payment=success"
+            },
+            "capture": True,
+            "description": f"Пополнение баланса: {tokens_amount} токенов",
+            "metadata": {
+                "user_id": user_id,
+                "tokens": tokens_amount
+            }
+        }, idempotency_key)
+        
+        # Сохраняем платеж в БД
+        execute_query_sync(
+            """
+            INSERT INTO payments (user_id, amount, tokens_amount, status, payment_id, provider, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (user_id, request.amount, tokens_amount, 'pending', payment.id, 'yookassa', json.dumps({
+                "idempotency_key": idempotency_key
+            }))
+        )
+        
+        logger.info(f"✅ Payment created: user={user_id}, amount={request.amount}, payment_id={payment.id}")
+        
+        return JSONResponse({
+            "payment_id": payment.id,
+            "confirmation_url": payment.confirmation.confirmation_url,
+            "amount": request.amount,
+            "tokens": tokens_amount
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error creating payment: {e}")
+        raise HTTPException(status_code=500, detail=f"Payment creation failed: {str(e)}")
+
+
+@app.post("/api/payment/webhook")
+async def payment_webhook(request: Request):
+    """
+    Webhook для обработки уведомлений от YooKassa
+    Использует idempotency для защиты от повторного начисления
+    """
+    try:
+        # Получаем тело запроса
+        body = await request.json()
+        
+        event_type = body.get("event")
+        payment_obj = body.get("object", {})
+        payment_id = payment_obj.get("id")
+        payment_status = payment_obj.get("status")
+        
+        logger.info(f"📥 Payment webhook: event={event_type}, payment_id={payment_id}, status={payment_status}")
+        
+        # Обрабатываем только успешные платежи
+        if event_type == "payment.succeeded" and payment_status == "succeeded":
+            # Извлекаем данные
+            amount = float(payment_obj.get("amount", {}).get("value", 0))
+            metadata = payment_obj.get("metadata", {})
+            user_id = int(metadata.get("user_id", 0))
+            tokens = int(metadata.get("tokens", 0))
+            
+            if not user_id or not tokens:
+                logger.error(f"❌ Invalid metadata in payment {payment_id}")
+                return JSONResponse({"status": "error", "message": "Invalid metadata"})
+            
+            # Используем idempotent функцию PostgreSQL
+            process_result = execute_query_sync(
+                "SELECT process_payment_idempotent(%s, %s, %s, %s, %s)",
+                (payment_id, user_id, amount, tokens, 'yookassa')
+            )
+            
+            if process_result and process_result[0][0]:
+                logger.info(f"✅ Payment processed: user={user_id}, tokens={tokens}, payment_id={payment_id}")
+            else:
+                logger.info(f"⏭️ Payment already processed (idempotency): payment_id={payment_id}")
+        
+        return JSONResponse({"status": "ok"})
+    
+    except Exception as e:
+        logger.error(f"❌ Error processing webhook: {e}")
+        # Возвращаем 200 чтобы YooKassa не повторял запрос
+        return JSONResponse({"status": "error", "message": str(e)})
+
+
+# ========================
+# Referral System endpoints
+# ========================
+
+@app.get("/api/referral/link")
+async def get_referral_link(user_id: int = Depends(get_current_user)):
+    """Получить реферальную ссылку пользователя"""
+    try:
+        # Генерируем реферальную ссылку
+        ref_code = f"ref_{user_id}"
+        referral_url = f"https://albi-music.ru/app/?ref={ref_code}"
+        
+        # Получаем статистику рефералов
+        referrals_result = execute_query_sync(
+            """
+            SELECT COUNT(*), COALESCE(SUM(CASE WHEN bonus_paid THEN 1 ELSE 0 END), 0)
+            FROM referrals
+            WHERE referrer_id = %s
+            """,
+            (user_id,)
+        )
+        
+        total_referrals = 0
+        paid_referrals = 0
+        
+        if referrals_result:
+            total_referrals = referrals_result[0][0] or 0
+            paid_referrals = referrals_result[0][1] or 0
+        
+        return JSONResponse({
+            "referral_url": referral_url,
+            "ref_code": ref_code,
+            "total_invited": total_referrals,
+            "tokens_earned": paid_referrals * 2,  # 2 токена за каждого
+            "bonus_5th_received": total_referrals >= 5
+        })
+    
+    except Exception as e:
+        logger.error(f"❌ Error getting referral link: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.get("/api/referral/stats")
+async def get_referral_stats(user_id: int = Depends(get_current_user)):
+    """Получить детальную статистику рефералов"""
+    try:
+        # Получаем список приглашенных пользователей
+        referrals_list = execute_query_sync(
+            """
+            SELECT r.referred_id, u.first_name, r.created_at, r.bonus_paid
+            FROM referrals r
+            JOIN users u ON r.referred_id = u.user_id
+            WHERE r.referrer_id = %s
+            ORDER BY r.created_at DESC
+            LIMIT 50
+            """,
+            (user_id,)
+        )
+        
+        invited_users = []
+        for row in referrals_list:
+            referred_id, first_name, created_at, bonus_paid = row
+            invited_users.append({
+                "user_id": referred_id,
+                "name": first_name or f"User {referred_id}",
+                "joined_at": created_at.isoformat() if created_at else None,
+                "bonus_received": bonus_paid
+            })
+        
+        return JSONResponse({
+            "invited_users": invited_users,
+            "total_count": len(invited_users)
+        })
+    
+    except Exception as e:
+        logger.error(f"❌ Error getting referral stats: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.post("/api/referral/register")
+async def register_referral(ref_code: str, user_id: int = Depends(get_current_user)):
+    """
+    Зарегистрировать пользователя как реферала
+    Вызывается при первом входе пользователя с ?ref= параметром
+    """
+    try:
+        # Извлекаем referrer_id из ref_code (формат: ref_12345)
+        if not ref_code.startswith("ref_"):
+            raise HTTPException(status_code=400, detail="Invalid referral code")
+        
+        referrer_id = int(ref_code[4:])
+        
+        # Проверяем, что пользователь не пытается пригласить сам себя
+        if referrer_id == user_id:
+            raise HTTPException(status_code=400, detail="Cannot refer yourself")
+        
+        # Проверяем, что пользователь еще не был приглашен
+        existing_ref = execute_query_sync(
+            "SELECT id FROM referrals WHERE referred_id = %s",
+            (user_id,)
+        )
+        
+        if existing_ref:
+            return JSONResponse({
+                "success": False,
+                "message": "User already has a referrer"
+            })
+        
+        # Создаем реферальную связь
+        execute_query_sync(
+            """
+            INSERT INTO referrals (referrer_id, referred_id, bonus_paid)
+            VALUES (%s, %s, TRUE)
+            """,
+            (referrer_id, user_id)
+        )
+        
+        # Начисляем 2 токена рефереру
+        execute_query_sync(
+            """
+            UPDATE users
+            SET balance = balance + 2
+            WHERE user_id = %s
+            """,
+            (referrer_id,)
+        )
+        
+        # Логируем транзакцию
+        execute_query_sync(
+            """
+            INSERT INTO token_transactions (user_id, amount, transaction_type, description)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (referrer_id, 2, 'credit', f'Referral bonus for user {user_id}')
+        )
+        
+        # Проверяем, не 5-й ли это друг (бонус +5 токенов)
+        referral_count_result = execute_query_sync(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id = %s",
+            (referrer_id,)
+        )
+        
+        if referral_count_result and referral_count_result[0][0] == 5:
+            # Начисляем бонус за 5-го друга
+            execute_query_sync(
+                """
+                UPDATE users
+                SET balance = balance + 5,
+                    referral_bonus_given = TRUE
+                WHERE user_id = %s
+                """,
+                (referrer_id,)
+            )
+            
+            # Логируем бонусную транзакцию
+            execute_query_sync(
+                """
+                INSERT INTO token_transactions (user_id, amount, transaction_type, description)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (referrer_id, 5, 'credit', 'Bonus for 5th referral')
+            )
+            
+            logger.info(f"🎁 5th referral bonus awarded: user={referrer_id}")
+        
+        logger.info(f"✅ Referral registered: referrer={referrer_id}, referred={user_id}")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Referral registered successfully",
+            "tokens_awarded": 2
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error registering referral: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================
+# Security & Rate Limiting endpoints
+# ========================
+
+@app.post("/api/check-rate-limit")
+async def check_rate_limit_endpoint(
+    action_type: str,
+    user_id: int = Depends(get_current_user)
+):
+    """
+    Проверить rate limit для действия (используется frontend перед запросом)
+    Возвращает: можно ли выполнить действие
+    """
+    try:
+        # Вызываем PostgreSQL функцию check_rate_limit
+        result = execute_query_sync(
+            "SELECT check_rate_limit(%s, %s, %s, %s)",
+            (user_id, action_type, 5, 1)  # 5 запросов в минуту
+        )
+        
+        can_proceed = result[0][0] if result else False
+        
+        if not can_proceed:
+            return JSONResponse({
+                "allowed": False,
+                "message": "Rate limit exceeded. Please wait a moment.",
+                "retry_after": 60  # секунд
+            }, status_code=429)
+        
+        return JSONResponse({
+            "allowed": True
+        })
+    
+    except Exception as e:
+        logger.error(f"❌ Error checking rate limit: {e}")
+        # В случае ошибки разрешаем действие (fail-open)
+        return JSONResponse({"allowed": True})
 
 
 # ========================
@@ -729,7 +1260,7 @@ async def health_check():
     return JSONResponse({
         "status": "ok",
         "service": "AlBi Music Web API",
-        "version": "1.0.0"
+        "version": "2.0.0"
     })
 
 
