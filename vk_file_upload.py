@@ -134,7 +134,12 @@ def check_audio_size(file_path: str, max_size_mb: int = 20) -> Tuple[bool, Optio
 
 def upload_audio_to_server(file_path: str, filename: str) -> Tuple[bool, Optional[str], Optional[str]]:
     """
-    Загрузить аудиофайл на сервер (заглушка, нужна реализация upload_file_to_server)
+    Загрузить аудиофайл на сервер
+    
+    Поддерживаемые методы (выбирается автоматически по config):
+    1. Локальное хранилище + nginx (LOCAL_STORAGE_PATH)
+    2. S3-совместимое хранилище (S3_BUCKET)
+    3. HTTP POST на внешний сервер (UPLOAD_SERVER_URL)
     
     Args:
         file_path: Путь к локальному файлу
@@ -144,24 +149,114 @@ def upload_audio_to_server(file_path: str, filename: str) -> Tuple[bool, Optiona
         Tuple (успех, URL файла, сообщение об ошибке)
     """
     try:
-        # ВРЕМЕННАЯ ЗАГЛУШКА
-        # В реальности нужно реализовать загрузку на ваш сервер
-        # Например, через S3, FTP, или HTTP POST
+        import shutil
+        from config import (
+            LOCAL_STORAGE_PATH,
+            S3_BUCKET,
+            S3_ACCESS_KEY,
+            S3_SECRET_KEY,
+            S3_ENDPOINT,
+            UPLOAD_SERVER_URL,
+            DOMAIN
+        )
         
-        # Пример для локального сервера:
-        # import requests
-        # files = {'file': open(file_path, 'rb')}
-        # response = requests.post('https://your-server.com/upload', files=files)
-        # return True, response.json()['url'], None
+        # ВАРИАНТ 1: Локальное хранилище (рекомендуется для начала)
+        if LOCAL_STORAGE_PATH := os.getenv('LOCAL_STORAGE_PATH', '/var/www/uploads/audio'):
+            try:
+                # Создаем директорию если нет
+                os.makedirs(LOCAL_STORAGE_PATH, exist_ok=True)
+                
+                # Копируем файл
+                dest_path = os.path.join(LOCAL_STORAGE_PATH, filename)
+                shutil.copy2(file_path, dest_path)
+                
+                # Устанавливаем права
+                os.chmod(dest_path, 0o644)
+                
+                # Формируем URL
+                domain = os.getenv('DOMAIN', 'your-domain.com')
+                file_url = f"https://{domain}/uploads/audio/{filename}"
+                
+                logger.info(f"✅ Файл загружен локально: {file_url}")
+                return True, file_url, None
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка локальной загрузки: {e}")
+                # Fallback на следующий метод
         
-        logger.warning("⚠️ upload_audio_to_server - заглушка! Нужна реализация загрузки на сервер")
+        # ВАРИАНТ 2: S3-совместимое хранилище (AWS S3, MinIO, Yandex Object Storage)
+        if S3_BUCKET := os.getenv('S3_BUCKET'):
+            try:
+                import boto3
+                from botocore.client import Config
+                
+                # Создаем S3 клиент
+                s3_client = boto3.client(
+                    's3',
+                    endpoint_url=os.getenv('S3_ENDPOINT', 'https://s3.amazonaws.com'),
+                    aws_access_key_id=os.getenv('S3_ACCESS_KEY'),
+                    aws_secret_access_key=os.getenv('S3_SECRET_KEY'),
+                    config=Config(signature_version='s3v4')
+                )
+                
+                # Загружаем файл
+                key = f"audio/{filename}"
+                s3_client.upload_file(
+                    file_path,
+                    S3_BUCKET,
+                    key,
+                    ExtraArgs={'ContentType': 'audio/mpeg', 'ACL': 'public-read'}
+                )
+                
+                # Формируем URL
+                file_url = f"{os.getenv('S3_ENDPOINT', 'https://s3.amazonaws.com')}/{S3_BUCKET}/{key}"
+                
+                logger.info(f"✅ Файл загружен в S3: {file_url}")
+                return True, file_url, None
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка S3 загрузки: {e}")
+                # Fallback на следующий метод
         
-        # Возвращаем фейковый URL для тестирования
-        fake_url = f"https://example.com/audio/{filename}"
-        return True, fake_url, None
+        # ВАРИАНТ 3: HTTP POST на внешний сервер загрузки
+        if UPLOAD_SERVER_URL := os.getenv('UPLOAD_SERVER_URL'):
+            try:
+                import requests
+                
+                with open(file_path, 'rb') as f:
+                    files = {'file': (filename, f, 'audio/mpeg')}
+                    response = requests.post(
+                        UPLOAD_SERVER_URL,
+                        files=files,
+                        timeout=30
+                    )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    file_url = result.get('url')
+                    
+                    if file_url:
+                        logger.info(f"✅ Файл загружен через HTTP: {file_url}")
+                        return True, file_url, None
+                
+                raise Exception(f"HTTP {response.status_code}: {response.text[:100]}")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка HTTP загрузки: {e}")
+        
+        # Если ни один метод не настроен - возвращаем ошибку
+        error_msg = (
+            "⚠️ Не настроен метод загрузки файлов!\n"
+            "Установите одну из переменных:\n"
+            "- LOCAL_STORAGE_PATH=/var/www/uploads/audio\n"
+            "- S3_BUCKET=your-bucket\n"
+            "- UPLOAD_SERVER_URL=https://your-server.com/upload"
+        )
+        logger.error(error_msg)
+        return False, None, error_msg
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки на сервер: {e}")
+        logger.error(f"❌ Критическая ошибка загрузки: {e}")
         return False, None, f"Ошибка загрузки: {str(e)[:100]}"
 
 
