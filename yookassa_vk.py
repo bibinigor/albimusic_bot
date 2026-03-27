@@ -75,7 +75,8 @@ class YooKassaVK:
                 'description': f'Покупка {amount} токенов в боте ALBImusic',
                 'metadata': {
                     'user_id': user_id,
-                    'tokens': amount
+                    'tokens': amount,
+                    'source': 'vk'  # Маркер: платеж из VK-бота
                 }
             }
             

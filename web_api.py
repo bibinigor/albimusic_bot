@@ -952,7 +952,8 @@ async def create_payment(request: CreatePaymentRequest, user_id: int = Depends(g
             "description": f"Пополнение баланса: {tokens_amount} токенов",
             "metadata": {
                 "user_id": user_id,
-                "tokens": tokens_amount
+                "tokens": tokens_amount,
+                "source": "web"  # Маркер: платеж с веб-сайта
             }
         }, idempotency_key)
         

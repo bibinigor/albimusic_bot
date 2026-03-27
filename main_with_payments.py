@@ -735,22 +735,33 @@ async def yookassa_webhook(request: Request):
     try:
         notification = await request.json()
         logging.info(f"Webhook от ЮKassa: {notification}")
+        
         if notification.get('event') == 'payment.succeeded':
             payment = notification.get('object', {})
             payment_id = payment.get('id')
-
-            # Обработка обычных платежей за генерации
-            user_id = payment.get('metadata', {}).get('user_id')
+            metadata = payment.get('metadata', {})
+            
+            # Проверяем источник платежа (telegram, web, vk)
+            source = metadata.get('source', 'telegram')  # По умолчанию telegram
+            
+            user_id = metadata.get('user_id')
             amount = float(payment.get('amount', {}).get('value', 0))
+            
             if user_id and amount:
-                # Определяем количество токенов по сумме
+                # Определяем количество токенов
                 amount_to_tokens = {
+                    # Web цены (новые)
                     50.00: 1,
                     250.00: 10,
                     500.00: 25,
                     1000.00: 60,
                     2000.00: 140,
-                    # Совместимость со старыми ценами
+                    # VK цены
+                    149.00: 5,
+                    249.00: 10,
+                    449.00: 20,
+                    999.00: 50,
+                    # Telegram старые цены (совместимость)
                     100.00: 1,
                     490.00: 10,
                     990.00: 25,
@@ -758,31 +769,65 @@ async def yookassa_webhook(request: Request):
                     3990.00: 140,
                     4000.00: 140
                 }
-
-                tokens = amount_to_tokens.get(amount, 1)  # По умолчанию 1 если сумма неизвестна
-
-                add_balance(user_id, tokens)
-                add_payment(user_id, amount, 'succeeded', payment.get('id'))
-                logging.info(f"✅ Начислено {tokens} токенов пользователю {user_id}")
-
-                try:
-                    inline_kb = InlineKeyboardMarkup(row_width=2)
-                    inline_kb.add(
-                        InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
-                        InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
-                    )
-                    await bot.send_message(
-                        int(user_id),
-                        f"🎉 Спасибо! Оплата поступила!\n\n"
-                        f"💰 Начислено: *{tokens} токенов*\n\n"
-                        f"🎵 Теперь вы получаете полные версии песен!\n\n"
-                        f"Нажмите кнопку ниже чтобы начать 👇",
-                        reply_markup=inline_kb,
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    logging.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {e}")
+                tokens = int(metadata.get('tokens', amount_to_tokens.get(amount, 1)))
+                
+                if source == 'web':
+                    # 🌐 Веб-платеж: PostgreSQL функция с idempotency
+                    logging.info(f"🌐 Web payment: user={user_id}, amount={amount}, tokens={tokens}")
+                    try:
+                        result = execute_query(
+                            "SELECT process_payment_idempotent(%s, %s, %s, %s, %s)",
+                            (payment_id, int(user_id), amount, tokens, 'yookassa')
+                        )
+                        if result and result[0][0]:
+                            logging.info(f"✅ Web payment processed: user={user_id}, tokens={tokens}")
+                        else:
+                            logging.warning(f"⚠️ Web payment already processed: {payment_id}")
+                    except Exception as e:
+                        logging.error(f"❌ Error processing web payment: {e}")
+                        
+                elif source == 'vk':
+                    # 💙 VK-платеж: тоже используем idempotency (но для VK user_id)
+                    logging.info(f"💙 VK payment: user={user_id}, amount={amount}, tokens={tokens}")
+                    try:
+                        result = execute_query(
+                            "SELECT process_payment_idempotent(%s, %s, %s, %s, %s)",
+                            (payment_id, int(user_id), amount, tokens, 'yookassa')
+                        )
+                        if result and result[0][0]:
+                            logging.info(f"✅ VK payment processed: user={user_id}, tokens={tokens}")
+                        else:
+                            logging.warning(f"⚠️ VK payment already processed: {payment_id}")
+                    except Exception as e:
+                        logging.error(f"❌ Error processing VK payment: {e}")
+                        
+                else:
+                    # 📱 Telegram-платеж: старая логика (обратная совместимость)
+                    logging.info(f"📱 Telegram payment: user={user_id}, amount={amount}, tokens={tokens}")
+                    add_balance(user_id, tokens)
+                    add_payment(user_id, amount, 'succeeded', payment_id)
+                    logging.info(f"✅ Начислено {tokens} токенов пользователю {user_id}")
+                    
+                    try:
+                        inline_kb = InlineKeyboardMarkup(row_width=2)
+                        inline_kb.add(
+                            InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
+                            InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
+                        )
+                        await bot.send_message(
+                            int(user_id),
+                            f"🎉 Спасибо! Оплата поступила!\n\n"
+                            f"💰 Начислено: *{tokens} токенов*\n\n"
+                            f"🎵 Теперь вы получаете полные версии песен!\n\n"
+                            f"Нажмите кнопку ниже чтобы начать 👇",
+                            reply_markup=inline_kb,
+                            parse_mode="Markdown"
+                        )
+                    except Exception as e:
+                        logging.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {e}")
+                
                 return JSONResponse({"status": "ok"})
+        
         return JSONResponse({"status": "ignored"})
     except Exception as e:
         logging.error(f"❌ Ошибка webhook: {e}")
