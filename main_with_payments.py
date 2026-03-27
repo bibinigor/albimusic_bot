@@ -640,7 +640,6 @@ async def process_generation_background(user_id, style, lyrics, is_song, is_free
 def get_main_menu_keyboard(user_id=None):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton("🎵 Создать песню"), KeyboardButton("🎶 Создать музыку"))
-    markup.add(KeyboardButton("🎬 Фото и Видео"), KeyboardButton("🎨 Изображения"))
     markup.add(KeyboardButton("📂 Мои треки"), KeyboardButton("💰 Баланс"))
     markup.add(KeyboardButton("🎧 Примеры песен и промптов"), KeyboardButton("📞 Поддержка"))
     if user_id and user_id == config.ADMIN_ID:
@@ -907,7 +906,10 @@ async def handle_create_song(message: types.Message, state: FSMContext):
     text = "Отлично! Придумать за тебя текст или у тебя свой?"
 
     await CreateSongStates.choosing_text_type.set()
-    await message.answer(text, reply_markup=markup, parse_mode="Markdown")
+    # Добавляем клавиатуру с кнопкой возврата в главное меню
+    home_kb = get_home_keyboard()
+    await message.answer(text, reply_markup=markup)
+    await message.answer("Чтобы вернуться в главное меню, нажмите кнопку ниже:", reply_markup=home_kb)
 
 @dp.message_handler(lambda message: message.text == "🎶 Создать музыку", state='*')
 async def handle_create_music(message: types.Message, state: FSMContext):
@@ -956,7 +958,10 @@ async def handle_create_music(message: types.Message, state: FSMContext):
     )
 
     await MusicStates.waiting_for_music_style.set()
+    # Добавляем клавиатуру с кнопкой возврата в главное меню
+    home_kb = get_home_keyboard()
     await message.answer(text, reply_markup=markup, parse_mode="Markdown")
+    await message.answer("Чтобы вернуться в главное меню, нажмите кнопку ниже:", reply_markup=home_kb)
 
 @dp.message_handler(lambda message: message.text == "💰 Баланс", state='*')
 async def handle_balance(message: types.Message, state: FSMContext):
@@ -995,41 +1000,70 @@ async def handle_my_tracks(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     track_first_menu_action(user_id)
 
-    # Получаем последние 20 генераций
-    tracks = execute_query_sync(
-        "SELECT task_id, prompt, audio_url, created_at, status FROM generations WHERE user_id = %s AND status = 'completed' ORDER BY created_at DESC LIMIT 20",
-        (user_id,)
-    )
-
-    if not tracks:
-        await message.answer("📂 У вас пока нет сохраненных треков.\n\nСоздайте свою первую композицию! 🎵")
-        return
-
-    text = f"🎵 <b>ТВОИ КОМПОЗИЦИИ</b>\n\n📊 Всего создано: {len(tracks)} треков\n\n"
-
-    for idx, (task_id, prompt, audio_url, created_at, status) in enumerate(tracks[:10], 1):
-        # Форматируем дату
-        date_str = created_at.strftime("%d %b") if hasattr(created_at, 'strftime') else str(created_at)[:10]
-        # Короткое описание - экранируем HTML
-        short_prompt = (prompt[:30] + '...') if len(prompt) > 30 else prompt
-        short_prompt = short_prompt.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        text += f"━━━━━━━━━━━━━━━━━\n🎼 #{idx} • {date_str}\n{short_prompt}\n"
-
-        # Inline кнопки для каждого трека
-        markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            InlineKeyboardButton("🔊 Слушать", callback_data=f"play_{task_id}"),
-            InlineKeyboardButton("🔁 Повторить", callback_data=f"repeat_{task_id}")
+    try:
+        # Получаем последние 20 генераций
+        tracks = execute_query_sync(
+            """
+            SELECT g.task_id, g.prompt, g.audio_url, g.created_at, g.status
+            FROM generations g
+            WHERE g.user_id = %s AND g.status = 'completed'
+            ORDER BY g.created_at DESC LIMIT 20
+            """,
+            (user_id,)
         )
-        markup.add(
-            InlineKeyboardButton("🔗 Отправить другу", switch_inline_query="")
-        )
-        # Отправляем каждый трек отдельным сообщением с кнопками
-        await message.answer(text, reply_markup=markup, parse_mode="HTML")
-        text = ""  # Сбрасываем для следующего
 
-    if len(tracks) > 10:
-        await message.answer(f"... и еще {len(tracks)-10} треков")
+        if not tracks:
+            await message.answer("*У вас пока нет созданных треков. Самое время это исправить! 🎵*", parse_mode="Markdown")
+            return
+
+        # Отправляем общую статистику
+        await message.answer(
+            f"🎵 *Ваши композиции*\n\n"
+            f"📊 Всего создано: {len(tracks)} треков\n"
+            f"━━━━━━━━━━━━━━━━━",
+            parse_mode="Markdown"
+        )
+
+        # Отправляем каждый трек отдельным сообщением
+        for idx, (task_id, prompt, audio_url, created_at, status) in enumerate(tracks[:10], 1):
+            # Форматируем дату
+            date_str = created_at.strftime("%d.%m.%Y") if hasattr(created_at, 'strftime') else str(created_at)[:10]
+            
+            # Форматируем описание
+            short_prompt = prompt[:100] + '...' if len(prompt) > 100 else prompt
+            
+            # Создаем клавиатуру для трека
+            markup = InlineKeyboardMarkup(row_width=2)
+            
+            # Если есть аудио URL
+            if audio_url and not audio_url.startswith('ERROR'):
+                markup.add(
+                    InlineKeyboardButton("🎧 Слушать", url=audio_url),
+                    InlineKeyboardButton("🔁 Повторить", callback_data=f"repeat_{task_id}")
+                )
+                markup.add(
+                    InlineKeyboardButton("🔗 Поделиться", switch_inline_query=task_id)
+                )
+            
+            track_text = (
+                f"*Трек #{idx}*\n"
+                f"📅 Дата: {date_str}\n"
+                f"📝 Описание: _{short_prompt}_\n"
+                f"━━━━━━━━━━━━━━━━━"
+            )
+            
+            await message.answer(track_text, reply_markup=markup, parse_mode="Markdown")
+
+        if len(tracks) > 10:
+            await message.answer(
+                f"_... и еще {len(tracks)-10} треков_\n\n"
+                f"Показаны последние 10 из {len(tracks)} треков",
+                parse_mode="Markdown"
+            )
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка при получении треков пользователя {user_id}: {e}")
+        await message.answer("❌ Произошла ошибка при получении списка треков. Попробуйте позже.")
 
 @dp.message_handler(lambda message: message.text == "🎤 Минусовка", state='*')
 async def handle_karaoke_menu(message: types.Message, state: FSMContext):
@@ -1198,6 +1232,15 @@ async def handle_song_examples(message: types.Message, state: FSMContext):
     )
     
     await message.answer(text, reply_markup=markup, parse_mode="Markdown")
+@dp.message_handler(lambda message: message.text == "📞 Поддержка", state='*')
+async def handle_support(message: types.Message, state: FSMContext):
+    # Сбрасываем состояние FSM если пользователь был в процессе генерации
+    await state.finish()
+    track_first_menu_action(message.from_user.id)
+
+    text = "*Служба поддержки ALBI Music 🛠\n\nПо всем вопросам пишите мне в личные сообщения: [https://vk.com/igorbibin]\n\n⏳ Отвечу вам в течение дня.*"
+    await message.answer(text, parse_mode="Markdown")
+
 @dp.message_handler(lambda message: message.text == "📄 Документы", state='*')
 async def handle_documents(message: types.Message, state: FSMContext):
     # Сбрасываем состояние FSM если пользователь был в процессе генерации
@@ -1215,10 +1258,44 @@ async def handle_admin_panel(message: types.Message, state: FSMContext):
     # Сбрасываем состояние FSM если пользователь был в процессе генерации
     await state.finish()
 
-    if is_admin(message.from_user.id):
-        await message.answer("👨‍💻 *Панель администратора:*", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
-    else:
+    user_id = message.from_user.id
+    if not is_admin(user_id):
         await message.answer("⛔ Доступ запрещен")
+        return
+
+    # Получаем статистику
+    stats = get_admin_stats()
+
+    # Форматируем статистику
+    text = f"""📊 *Статистика бота:*
+
+👥 Всего пользователей: {stats.get("total_users", 0)} (+{stats.get("new_today", 0)})
+📈 Новых за 7 дней: {stats.get("new_7days", 0)}
+📅 Новых за 30 дней: {stats.get("new_30days", 0)}
+
+📊 *Воронка (НОВЫЕ за 24ч):*
+▶️ Нажали Начать (новые): {stats.get("started_24h", 0)}
+🖱 Дошли до меню: {stats.get("menu_24h", 0)}
+
+🎵 Генераций за 24ч: {stats.get("generations_24h", 0)} шт
+✅ Общий успех (все время): {stats.get("success_rate", 0)}%
+
+💳 *Оплаты:*
+⏰ За 24ч: {stats.get("count_24h", 0)} платежей · {stats.get("sum_24h", 0)}₽
+📆 За 7 дней: {stats.get("count_7days", 0)} платежей · {stats.get("sum_7days", 0)}₽
+📊 Всего: {stats.get("count_total", 0)} платежей · {stats.get("sum_total", 0)}₽
+
+👥 Приглашенных сегодня: {stats.get("invited_today", 0)}"""
+
+    # Создаем клавиатуру с кнопками управления
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🔄 Обновить статистику", callback_data="refresh_stats"),
+        InlineKeyboardButton("📨 Рассылка", callback_data="admin_broadcast"),
+        InlineKeyboardButton("📩 Поддержка", callback_data="admin_support")
+    )
+
+    await message.answer(text, reply_markup=markup, parse_mode="Markdown")
 
 # ========== INLINE QUERY HANDLER (Отправить другу) ==========
 
@@ -1371,6 +1448,12 @@ async def handle_own_text(callback_query: types.CallbackQuery, state: FSMContext
     await bot.send_message(callback_query.from_user.id, text, parse_mode="Markdown", reply_markup=refresh_btn)
 
 @dp.message_handler(state=CreateSongStates.waiting_song_idea)
+@dp.message_handler(lambda message: message.text == "🏠 В главное меню", state='*')
+async def handle_home_button(message: types.Message, state: FSMContext):
+    """Обработчик кнопки возврата в главное меню"""
+    await state.finish()
+    await message.answer("Вы вернулись в главное меню!", reply_markup=get_main_menu_keyboard(message.from_user.id))
+
 async def process_song_idea(message: types.Message, state: FSMContext):
     """Получили описание для AI-генерации текста"""
     song_idea = message.text
@@ -1843,7 +1926,7 @@ async def show_offer(callback_query: types.CallbackQuery):
     await bot.send_message(callback_query.from_user.id, "📄 Публичная оферта: https://albi-music.ru/documents/offer.html")
 
 
-@dp.callback_query_handler(lambda c: c.data == 'admin_stats')
+@dp.callback_query_handler(lambda c: c.data == 'refresh_stats')
 async def process_admin_stats(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
     if not is_admin(callback_query.from_user.id):
@@ -1900,6 +1983,68 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
 
     refresh_btn = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats"))
     await bot.send_message(callback_query.from_user.id, text, parse_mode="Markdown", reply_markup=refresh_btn)
+
+# ─── Обработчики кнопок для треков ────────────────────────────
+
+@dp.callback_query_handler(lambda c: c.data.startswith('repeat_'))
+async def handle_repeat_track(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обработчик кнопки повтора трека"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    task_id = callback_query.data.replace('repeat_', '')
+
+    try:
+        # Получаем информацию о треке
+        track = execute_query_sync(
+            """
+            SELECT prompt, audio_url
+            FROM generations
+            WHERE task_id = %s AND user_id = %s
+            """,
+            (task_id, user_id)
+        )
+
+        if not track:
+            await bot.send_message(user_id, "❌ Трек не найден")
+            return
+
+        prompt = track[0][0]
+        
+        # Проверяем баланс
+        if not is_admin(user_id):
+            balance = get_balance_number(user_id)
+            if balance <= 0:
+                await bot.send_message(
+                    user_id,
+                    "❌ Недостаточно токенов на балансе.\n\nНажмите кнопку 💰 Баланс чтобы пополнить.",
+                    reply_markup=get_main_menu_keyboard(user_id)
+                )
+                return
+
+        # Отправляем сообщение о начале генерации
+        await bot.send_message(
+            user_id,
+            f"🎵 *Повторная генерация трека*\n\n"
+            f"📝 Описание: _{prompt}_\n\n"
+            f"⏳ Начинаю генерацию...",
+            parse_mode="Markdown"
+        )
+
+        # Запускаем генерацию
+        await process_generation_background(
+            user_id=user_id,
+            style=prompt,
+            lyrics=None,
+            is_song=False,
+            is_free=False,
+            custom_mode=False,
+            processing_msg_id=callback_query.message.message_id,
+            chat_id=user_id
+        )
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка при повторе трека {task_id} для пользователя {user_id}: {e}")
+        await bot.send_message(user_id, "❌ Произошла ошибка. Попробуйте позже.")
 
 # ─── Рассылка (Админ) ────────────────────────────────────────
 

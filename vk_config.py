@@ -9,5 +9,10 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
-# Other configurations can be added here as needed
+# Admin configuration
+ADMIN_VK_ID = 57725952  # ID администратора VK
+CO_ADMIN_ID = 57725952  # ID со-администратора (может быть тот же)
+ADMIN_IDS = [ADMIN_VK_ID, CO_ADMIN_ID]  # Список ID администраторов
+
+# Debug mode
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"

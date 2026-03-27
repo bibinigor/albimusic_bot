@@ -55,7 +55,7 @@ def get_song_type_keyboard():
     """Клавиатура выбора типа создания песни"""
     keyboard = VkKeyboard(inline=True)
     
-    keyboard.add_button('🤖 AI-текст', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Придумать текст', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('✍️ Свой текст', color=VkKeyboardColor.PRIMARY)
     
     keyboard.add_line()
@@ -88,17 +88,13 @@ def get_music_genres_keyboard():
     """Клавиатура выбора жанра музыки"""
     keyboard = VkKeyboard(inline=True)
     
-    # Основные популярные жанры (максимум 10 жанров для inline-клавиатуры)
+    # Основные популярные жанры (сокращенный список)
     genres = [
         ("🎤 Поп", VkKeyboardColor.PRIMARY),
         ("🎸 Рок", VkKeyboardColor.PRIMARY),
         ("🎺 Джаз", VkKeyboardColor.PRIMARY),
         ("⚡ Электронная", VkKeyboardColor.PRIMARY),
-        ("🎻 Классическая", VkKeyboardColor.PRIMARY),
-        ("🎧 Хип-хоп", VkKeyboardColor.PRIMARY),
-        ("🤘 Метал", VkKeyboardColor.PRIMARY),
-        ("💃 Латины", VkKeyboardColor.PRIMARY),
-        ("🎙️ Шансон", VkKeyboardColor.PRIMARY),
+        ("🎻 Классика", VkKeyboardColor.PRIMARY),
         ("✏️ Свой вариант", VkKeyboardColor.POSITIVE)
     ]
     
@@ -161,17 +157,13 @@ def get_song_genres_keyboard():
     """Клавиатура выбора жанра песни"""
     keyboard = VkKeyboard(inline=True)
     
-    # Основные популярные жанры (максимум 10 жанров для inline-клавиатуры)
+    # Основные популярные жанры (сокращенный список)
     genres = [
         ("🎤 Поп", VkKeyboardColor.PRIMARY),
         ("🎸 Рок", VkKeyboardColor.PRIMARY),
         ("🎺 Джаз", VkKeyboardColor.PRIMARY),
         ("⚡ Электронная", VkKeyboardColor.PRIMARY),
-        ("🎻 Классическая", VkKeyboardColor.PRIMARY),
-        ("🎧 Хип-хоп", VkKeyboardColor.PRIMARY),
-        ("🤘 Метал", VkKeyboardColor.PRIMARY),
-        ("💃 Латины", VkKeyboardColor.PRIMARY),
-        ("🎙️ Шансон", VkKeyboardColor.PRIMARY),
+        ("🎻 Классика", VkKeyboardColor.PRIMARY),
         ("✏️ Свой вариант", VkKeyboardColor.POSITIVE)
     ]
     
@@ -232,5 +224,59 @@ def get_balance_actions_keyboard():
     
     keyboard.add_line()
     keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.SECONDARY)
+    
+    return keyboard
+
+def get_lyrics_variants_selection_keyboard():
+    """Клавиатура выбора варианта текста после генерации"""
+    keyboard = VkKeyboard(inline=True)
+    
+    keyboard.add_button('Выбрать вариант 1', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Выбрать вариант 2', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Написать свой текст', color=VkKeyboardColor.SECONDARY)
+    
+    return keyboard
+
+def get_song_options_keyboard(task_id):
+    """Клавиатура с опциями для готовой песни"""
+    keyboard = VkKeyboard(inline=True)
+    
+    keyboard.add_button('🎤 Минусовка (1 токен)', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('🎸 Кавер (1 токен)', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('🎵 В WAV (2 токена)', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('📢 Отправить в канал', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button('🔗 Поделиться', color=VkKeyboardColor.POSITIVE)
+    
+    return keyboard
+
+def get_vocal_gender_keyboard():
+    """Клавиатура выбора пола вокалиста"""
+    keyboard = VkKeyboard(inline=True)
+    
+    keyboard.add_button('👨 Мужской', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('👩 Женский', color=VkKeyboardColor.PRIMARY)
+    
+    keyboard.add_line()
+    keyboard.add_button('🏠 В главное меню', color=VkKeyboardColor.SECONDARY)
+    
+    return keyboard
+
+def get_lyrics_variants_keyboard_with_two_options():
+    """Клавиатура выбора между двумя вариантами текста после генерации"""
+    keyboard = VkKeyboard(inline=True)
+    
+    keyboard.add_button('Выбрать вариант 1', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Выбрать вариант 2', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Написать свой текст', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button('🔄 Сгенерировать другие', color=VkKeyboardColor.POSITIVE)
     
     return keyboard

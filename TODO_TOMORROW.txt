@@ -1,0 +1,7 @@
+Завтра пользователю нужно просто удалить старый файл main_vk.py и переименовать готовый файл main_vk_NEW_complete.py в main_vk.py.
+
+Команды для выполнения:
+1. rm main_vk.py
+2. mv main_vk_NEW_complete.py main_vk.py
+
+После этого бот будет работать корректно с исправленным методом handle_message.
