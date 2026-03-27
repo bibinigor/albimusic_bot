@@ -1000,6 +1000,201 @@ def generate_suno_wav_sync(suno_id):
     logger.error(f"[{request_id}] ❌ SUNO WAV TIMEOUT")
     return None
 
+@celery_app.task(name='generate_suno_cover')
+def generate_suno_cover(suno_id, genre):
+    """Генерация кавера через Suno API"""
+    return generate_suno_cover_sync(suno_id, genre)
+
+def generate_suno_cover_sync(suno_id, genre):
+    """Синхронная версия генерации кавера через Suno API"""
+    import uuid
+    import time
+    request_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+
+    logger.info(f"╔═══════════════════════════════════════════════════════════╗")
+    logger.info(f"║  SUNO COVER API REQUEST | ID: {request_id}                ")
+    logger.info(f"╚═══════════════════════════════════════════════════════════╝")
+    logger.info(f"[{request_id}] 📝 INPUT PARAMETERS:")
+    logger.info(f"[{request_id}]    • Suno ID: {suno_id}")
+    logger.info(f"[{request_id}]    • Genre: {genre}")
+
+    headers = {
+        "Authorization": f"Bearer {config.SUNO_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "songId": suno_id,
+        "genre": genre,
+        "callBackUrl": "https://albi-music.ru/webhook/suno"
+    }
+
+    try:
+        api_start = time.time()
+        response = requests.post(f"{config.SUNO_API_URL}/api/v1/cover", json=data, headers=headers, timeout=300)
+        api_duration = time.time() - api_start
+
+        logger.info(f"[{request_id}] 📥 SUNO API RESPONSE:")
+        logger.info(f"[{request_id}]    • Status code: {response.status_code}")
+        logger.info(f"[{request_id}]    • Response time: {api_duration:.2f}s")
+
+        if response.status_code == 200:
+            result = response.json()
+            api_code = result.get('code')
+            api_msg = result.get('msg', 'No message')
+            data_obj = result.get('data')
+
+            if api_code != 200:
+                logger.error(f"[{request_id}] ❌ SUNO API ERROR: Code={api_code}, Msg={api_msg}")
+                return None
+
+            task_id = data_obj.get('taskId')
+            logger.info(f"[{request_id}] 🎵 SUNO COVER TASK CREATED: Task ID={task_id}")
+
+            # Ожидаем завершения генерации
+            for i in range(90):  # 90 попыток по 10 секунд = 15 минут
+                time.sleep(10)
+                status_response = requests.get(
+                    f"{config.SUNO_API_URL}/api/v1/cover/record-info?taskId={task_id}",
+                    headers=headers, timeout=60
+                )
+
+                if status_response.status_code == 200:
+                    status_result = status_response.json()
+                    status = status_result.get('data', {}).get('status')
+
+                    logger.info(f"[{request_id}] 📊 COVER TASK STATUS #{i+1}: {status} ({(i+1)*10}s)")
+
+                    if status == 'SUCCESS':
+                        audio_url = status_result.get('data', {}).get('response', {}).get('audioUrl')
+                        if audio_url:
+                            logger.info(f"[{request_id}] ✅ SUNO COVER COMPLETED: {audio_url} ({time.time()-start_time:.2f}s)")
+                            return audio_url
+                    elif status == 'ERROR':
+                        error_msg = status_result.get('data', {}).get('response', {}).get('error', 'Unknown error')
+                        logger.error(f"[{request_id}] ❌ SUNO COVER ERROR: {error_msg}")
+                        return None
+        else:
+            logger.error(f"[{request_id}] ❌ SUNO API ERROR: Status code {response.status_code}")
+            logger.error(f"[{request_id}]    • Response: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ SUNO COVER ERROR: {e}")
+        return None
+
+    logger.error(f"[{request_id}] ❌ SUNO COVER TIMEOUT")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# GENERATE SUNO LYRICS (синхронная генерация текста для VK бота)
+# ═══════════════════════════════════════════════════════════════
+
+def generate_suno_lyrics_sync(prompt, user_id=None):
+    """Синхронная генерация текста песни через Suno API"""
+    import uuid
+    import time
+    request_id = str(uuid.uuid4())[:8]
+
+    logger.info(f"╔════════════════════════════════════════╗")
+    logger.info(f"║  SUNO LYRICS API | ID: {request_id} | User: {user_id}")
+    logger.info(f"╚════════════════════════════════════════╝")
+    logger.info(f"[{request_id}] 📝 INPUT: {prompt[:200]}")
+
+    headers = {
+        "Authorization": f"Bearer {config.SUNO_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "prompt": prompt,
+        "callBackUrl": "https://albi-music.ru/webhook/suno/lyrics"
+    }
+
+    try:
+        response = requests.post(
+            f"{config.SUNO_API_URL}/api/v1/lyrics",
+            json=data, headers=headers, timeout=60
+        )
+        logger.info(f"[{request_id}] 📥 Response: {response.status_code}")
+
+        if response.status_code == 200:
+            result = response.json()
+            api_code = result.get('code')
+            if api_code != 200:
+                logger.error(f"[{request_id}] ❌ API ERROR: {result.get('msg')}")
+                return None
+
+            task_id = result.get('data', {}).get('taskId')
+            logger.info(f"[{request_id}] 🎵 Lyrics task created: {task_id}")
+
+            # Ожидаем завершения генерации (polling: 30 попыток по 5 секунд = 2.5 мин)
+            for i in range(30):
+                time.sleep(5)
+                status_urls = [
+                    f"{config.SUNO_API_URL}/api/v1/lyrics?taskId={task_id}",
+                    f"{config.SUNO_API_URL}/api/v1/lyrics/record-info?taskId={task_id}",
+                ]
+                for status_url in status_urls:
+                    try:
+                        status_response = requests.get(status_url, headers=headers, timeout=30)
+                        if status_response.status_code != 200:
+                            continue
+                        status_result = status_response.json()
+                        if not status_result:
+                            continue
+
+                        data_obj = status_result.get('data', {})
+                        if not data_obj:
+                            continue
+
+                        status = None
+                        lyrics_text = None
+
+                        if isinstance(data_obj, dict):
+                            status = data_obj.get('status')
+                            lyrics_text = data_obj.get('text', '')
+                            # record-info: data.response.data[]
+                            response_obj = data_obj.get('response', {})
+                            if response_obj and isinstance(response_obj, dict):
+                                response_data = response_obj.get('data', [])
+                                if isinstance(response_data, list) and len(response_data) > 0:
+                                    status = response_data[0].get('status', status)
+                                    lyrics_text = response_data[0].get('text', '') or lyrics_text
+                        elif isinstance(data_obj, list) and len(data_obj) > 0:
+                            status = data_obj[0].get('status')
+                            lyrics_text = data_obj[0].get('text', '')
+
+                        logger.info(f"[{request_id}] 📊 Lyrics poll #{i+1}: status={status}")
+
+                        if status in ('complete', 'SUCCESS'):
+                            if lyrics_text:
+                                logger.info(f"[{request_id}] ✅ Lyrics ready: {len(lyrics_text)} chars")
+                                return lyrics_text
+                            else:
+                                logger.warning(f"[{request_id}] ⚠️ Status complete but no text")
+                                continue
+                        elif status in ('failed', 'ERROR'):
+                            logger.error(f"[{request_id}] ❌ Lyrics generation failed")
+                            return None
+
+                        if status:
+                            break
+                    except Exception as e:
+                        logger.warning(f"[{request_id}] ⚠️ URL {status_url} failed: {e}")
+                        continue
+
+            logger.error(f"[{request_id}] ⏰ Lyrics timeout")
+            return None
+        else:
+            logger.error(f"[{request_id}] ❌ HTTP {response.status_code}: {response.text[:300]}")
+            return None
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ Exception in generate_suno_lyrics_sync: {e}")
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════
 # WORKER SIGNALS
 # ═══════════════════════════════════════════════════════════════
