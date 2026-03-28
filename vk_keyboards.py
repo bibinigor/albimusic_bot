@@ -1,6 +1,7 @@
 """
 Модуль для работы с клавиатурами VK бота
 """
+import json
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
 def get_main_keyboard(user_id=None):
@@ -337,5 +338,73 @@ def get_lyrics_variants_keyboard_with_two_options():
     keyboard.add_button('Написать свой текст', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button('🔄 Сгенерировать другие', color=VkKeyboardColor.POSITIVE)
+    
+    return keyboard
+def get_payment_keyboard():
+    """Клавиатура с тарифами оплаты (inline-кнопки с callback)"""
+    keyboard = VkKeyboard(inline=True)
+    
+    # Тарифы синхронизированы с Telegram-ботом
+    tariffs = [
+        ("💫 1 токен — 50₽", 50),
+        ("💳 10 токенов — 250₽", 250),
+        ("🔥 25 токенов — 500₽", 500),
+        ("⭐ 60 токенов — 1000₽", 1000),
+        ("💎 140 токенов — 2000₽", 2000)
+    ]
+    
+    for label, amount in tariffs:
+        keyboard.add_callback_button(
+            label=label,
+            color=VkKeyboardColor.POSITIVE,
+            payload=json.dumps({"action": "payment", "amount": amount})
+        )
+        keyboard.add_line()
+    
+    # Кнопка приглашения друга
+    keyboard.add_callback_button(
+        label="🌟 Пригласить друга (+2 токена)",
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": "invite_friend"})
+    )
+    
+    return keyboard
+
+def get_track_actions_keyboard(task_id, has_two_variants=False):
+    """Клавиатура действий с треком (inline-кнопки)"""
+    keyboard = VkKeyboard(inline=True)
+    
+    if has_two_variants:
+        # Если 2 варианта - кнопки для прослушивания
+        keyboard.add_callback_button(
+            label="🎧 Вариант 1",
+            color=VkKeyboardColor.PRIMARY,
+            payload=json.dumps({"action": "play", "task_id": str(task_id), "variant": 1})
+        )
+        keyboard.add_callback_button(
+            label="🎧 Вариант 2",
+            color=VkKeyboardColor.PRIMARY,
+            payload=json.dumps({"action": "play", "task_id": str(task_id), "variant": 2})
+        )
+        keyboard.add_line()
+    
+    # Доп. функции
+    keyboard.add_callback_button(
+        label="🎤 Минусовка (1 токен)",
+        color=VkKeyboardColor.SECONDARY,
+        payload=json.dumps({"action": "karaoke", "task_id": str(task_id)})
+    )
+    keyboard.add_callback_button(
+        label="🎸 Кавер (1 токен)",
+        color=VkKeyboardColor.SECONDARY,
+        payload=json.dumps({"action": "cover", "task_id": str(task_id)})
+    )
+    keyboard.add_line()
+    
+    keyboard.add_callback_button(
+        label="🎵 В WAV (2 токена)",
+        color=VkKeyboardColor.SECONDARY,
+        payload=json.dumps({"action": "wav", "task_id": str(task_id)})
+    )
     
     return keyboard

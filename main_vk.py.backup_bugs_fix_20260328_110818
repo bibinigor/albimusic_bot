@@ -18,7 +18,6 @@ import aioredis
 from vk_config import VK_TOKEN, VK_GROUP_ID, ADMIN_IDS
 from vk_states import States, VKStateManager
 from db_utils import execute_query_sync
-from celery_tasks import translate_style_to_english
 
 # Настройка логирования
 logging.basicConfig(
@@ -610,24 +609,20 @@ class VKBot:
                     balance_str = f"💰 {balance_num} токенов" if balance_num > 0 else "❌ 0 токенов"
                     balance_msg = (
                         f"💰 Ваш баланс: {balance_str}\n\n"
-                        f"💳 Выберите тариф для пополнения:\n\n"
+                        f"💳 Пополнить баланс:\n\n"
                         f"💫 1 токен (2 песни) — 50₽\n"
                         f"💳 10 токенов (20 песен) — 250₽\n"
                         f"🔥 25 токенов (50 песен) — 500₽\n"
                         f"⭐ 60 токенов (120 песен) — 1000₽\n"
                         f"💎 140 токенов (280 песен) — 2000₽\n\n"
                         f"🌟 Пригласи друга — получи 2 токена бесплатно!\n"
-                        f"🎁 Первый токен в подарок — для новых пользователей!"
+                        f"🎁 Первый токен в подарок — для новых пользователей!\n\n"
+                        f"📩 Для оплаты напишите в поддержку: https://vk.com/igorbibin"
                     )
-                    
-                    # Создаем клавиатуру с тарифами
-                    from vk_keyboards import get_payment_keyboard
-                    payment_keyboard = get_payment_keyboard()
-                    
                     self.send_message(
                         user_id=user_id,
                         message=balance_msg,
-                        keyboard=payment_keyboard
+                        keyboard=self.get_main_keyboard(user_id)
                     )
                 except Exception as e:
                     logger.error(f"❌ Ошибка при получении баланса: {e}")
@@ -700,11 +695,11 @@ class VKBot:
                 self.send_message(
                     user_id=user_id,
                     message=(
-                        "🔐 Это портал для перехода в наше сообщество\n\n"
+                        "🔐 Это портал для перехода в наш секретный канал\n\n"
                         "«ALBImusic/ Музыка/ Промпты/ Новости/ Обучение»\n\n"
                         "Там твоё вдохновение! Там твоё секретное оружие — идеи! "
                         "И там же обучение и новости!\n\n"
-                        "👉 Переходи в сообщество: https://vk.com/club235442407"
+                        "👉 Переходи в канал: https://t.me/ALBImusic_chart"
                     ),
                     keyboard=self.get_main_keyboard(user_id)
                 )
@@ -1232,12 +1227,8 @@ class VKBot:
                     # Импортируем функцию для генерации песни
                     from celery_tasks import generate_suno_song_sync
                     
-                    # Переводим жанр на английский для Suno API
-                    translated_genre = translate_style_to_english(genre, add_improvements=False)
-                    logger.info(f"🔄 Перевод жанра для песни: '{genre}' → '{translated_genre}'")
-                    
                     # Формируем стиль с учетом пола вокалиста
-                    style = f"{translated_genre}, {vocal_gender} vocals"
+                    style = f"{genre}, {vocal_gender} vocals"
                     
                     # Проверяем длину текста песни и автоматически включаем customMode для длинных текстов
                     use_custom_mode = len(lyrics) > 500
@@ -1346,13 +1337,6 @@ class VKBot:
             # Обработка выбора жанра для инструментальной музыки
             elif vk_state == States.WAITING_MUSIC_STYLE:
                 genre = text  # Выбранный жанр
-                
-                # Переводим жанр на английский для Suno API
-                translated_genre = translate_style_to_english(genre, add_improvements=False)
-                logger.info(f"🔄 Перевод жанра для музыки: '{genre}' → '{translated_genre}'")
-                
-                # Используем переведенный жанр
-                genre = translated_genre
                 logger.info(f"🎶 Пользователь {user_id} выбрал жанр для инструментала: {genre}")
 
                 # Сбрасываем состояние ДО запуска потока
@@ -1799,8 +1783,8 @@ class VKBot:
                                 # Получаем информацию о песне из базы данных
                                 if task_id_from_payload:
                                     song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s LIMIT 1",
-                                        (task_id_from_payload,)
+                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
+                                        (task_id_from_payload, user_id)
                                     )
                                 else:
                                     song_info = execute_query_sync(
@@ -1903,8 +1887,8 @@ class VKBot:
                                 # Получаем информацию о песне из базы данных
                                 if task_id_from_payload:
                                     song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s LIMIT 1",
-                                        (task_id_from_payload,)
+                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
+                                        (task_id_from_payload, user_id)
                                     )
                                 else:
                                     song_info = execute_query_sync(
@@ -2037,7 +2021,7 @@ class VKBot:
                                 # Получаем suno_audio_id по task_id
                                 if cover_task_id:
                                     song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id, prompt FROM generations WHERE task_id = %s LIMIT 1",
+                                        "SELECT audio_url, suno_audio_id, prompt FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
                                         (cover_task_id, user_id)
                                     )
                                 else:
@@ -2114,7 +2098,7 @@ class VKBot:
                     if task_id_from_payload:
                         song_info = execute_query_sync(
                             "SELECT audio_url, prompt FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
-                            (task_id_from_payload,)
+                            (task_id_from_payload, user_id)
                         )
                     else:
                         song_info = execute_query_sync(
