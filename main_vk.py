@@ -236,7 +236,7 @@ class VKBot:
             # Используем клавиатуру из модуля vk_keyboards
             from vk_keyboards import get_main_keyboard
             
-            keyboard = get_main_keyboard(user_id in ADMIN_IDS)
+            keyboard = get_main_keyboard(user_id)
             logger.info("✅ Клавиатура успешно создана")
             return keyboard
         except Exception as e:
@@ -724,6 +724,33 @@ class VKBot:
                         "👉 https://vk.com/igorbibin\n\n"
                         "⏳ Отвечу вам в течение дня."
                     ),
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+                command_handled = True
+                return
+
+            # ──── АДМИН ПАНЕЛЬ ────
+            elif "админ" in text_lower or text == "⚙️ Админ":
+                logger.info(f"⚙️ Запрос админ панели от пользователя {user_id}")
+                
+                # Проверка является ли пользователь администратором
+                if user_id not in ADMIN_IDS:
+                    logger.warning(f"⛔ Попытка доступа к админ панели от не-администратора {user_id}")
+                    self.send_message(
+                        user_id=user_id,
+                        message="⛔ Доступ запрещен",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+                    command_handled = True
+                    return
+                
+                # Получаем статистику
+                stats_text = self.get_admin_stats()
+                
+                # Отправляем статистику администратору
+                self.send_message(
+                    user_id=user_id,
+                    message=f"👨‍💻 **Панель администратора**\n\n{stats_text}",
                     keyboard=self.get_main_keyboard(user_id)
                 )
                 command_handled = True
@@ -1285,7 +1312,6 @@ class VKBot:
                                 
                                 # Проверяем, содержит ли audio_url несколько ссылок (JSON массив)
                                 try:
-                                    import json
                                     if isinstance(audio_url, str):
                                         audio_urls = json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
                                     else:
@@ -1670,7 +1696,6 @@ class VKBot:
                     
                     # Проверяем, содержит ли audio_url несколько ссылок (JSON массив)
                     try:
-                        import json
                         audio_urls = json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
                         
                         # Если есть несколько ссылок, добавляем их все в сообщение
@@ -1753,7 +1778,6 @@ class VKBot:
             # Преобразуем payload в словарь, если он строка
             if isinstance(payload, str):
                 try:
-                    import json
                     payload = json.loads(payload)
                 except Exception as e:
                     logger.error(f"❌ Ошибка при разборе payload: {e}")
@@ -1878,7 +1902,7 @@ class VKBot:
                         f"🎁 За каждого друга получишь 2 ТОКЕНА бесплатно!\n\n"
                         f"📎 Твоя реферальная ссылка:\n{referral_link}\n\n"
                         f"💡 Отправь её другу, и как только он создаст первую песню — "
-                        f"вы оба получите по 2 токена в подарок!"
+                        f"ты получишь 2 токена в подарок, а он получит 1 токен как новичок!"
                     ),
                     keyboard=self.get_main_keyboard(user_id)
                 )
@@ -1936,7 +1960,7 @@ class VKBot:
                         keyboard=self.get_main_keyboard(user_id)
                     )
             
-            # Обработка кнопки "Минусовка"
+            # Обработка кнопки "Минусовка" - показываем выбор версии
             elif action == "karaoke":
                 logger.info(f"🎤 Запрос на создание минусовки от пользователя {user_id}")
                 
@@ -1947,99 +1971,13 @@ class VKBot:
                         (user_id,)
                     )
                     if result and result[0][0] > 0:
-                        # Отправляем сообщение о начале генерации минусовки
+                        # Показываем выбор версии
+                        from vk_keyboards import get_version_selection_keyboard
                         self.send_message(
                             user_id=user_id,
-                            message="⏳ Генерирую минусовку, подождите 1-2 минуты...",
-                            keyboard=self.get_cancel_keyboard()
+                            message="🎤 **МИНУСОВКА**\n\nВыбери версию для создания минусовки:\n\n🎵 Версия 1 - первый трек\n🎵 Версия 2 - второй трек",
+                            keyboard=get_version_selection_keyboard(task_id_from_payload, "karaoke")
                         )
-                        
-                        # Запускаем генерацию минусовки в отдельном потоке
-                        import threading
-                        def generate_karaoke_thread():
-                            try:
-                                # Получаем информацию о песне из базы данных
-                                if task_id_from_payload:
-                                    song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
-                                        (task_id_from_payload, user_id)
-                                    )
-                                else:
-                                    song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE user_id = %s ORDER BY id DESC LIMIT 1",
-                                        (user_id,)
-                                    )
-
-                                if song_info and len(song_info) > 0 and song_info[0][0] and song_info[0][1]:
-                                    audio_url = song_info[0][0]
-                                    suno_id = song_info[0][1]
-                                    
-                                    # Генерируем минусовку через Celery task
-                                    # Нужно получить task_id оригинальной генерации
-                                    if task_id_from_payload:
-                                        original_task_id = task_id_from_payload
-                                    else:
-                                        # Получаем последний task_id
-                                        task_result = execute_query_sync(
-                                            "SELECT task_id FROM generations WHERE user_id = %s AND suno_audio_id = %s ORDER BY id DESC LIMIT 1",
-                                            (user_id, suno_id)
-                                        )
-                                        original_task_id = task_result[0][0] if task_result else None
-                                    
-                                    if original_task_id:
-                                        # Запускаем Celery task асинхронно
-                                        task_result = generate_karaoke_task.apply_async(args=(user_id, original_task_id, 0, None))
-                                        result = task_result.get(timeout=300) if task_result else None
-                                        # Celery task возвращает словарь {'status': 'success', 'audio_url': ...}
-                                        karaoke_url = result.get('audio_url') if result and result.get('status') == 'success' else None
-                                    else:
-                                        karaoke_url = None
-                                    
-                                    if karaoke_url:
-                                        # Сохраняем результат в базу данных
-                                        execute_query_sync(
-                                            'INSERT INTO generations (user_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s)',
-                                            (user_id, f"Минусовка для {suno_id}", karaoke_url, False, False)
-                                        )
-                                        
-                                        # Отправляем результат пользователю
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message=f"✅ Минусовка готова!\n\nСсылка: {karaoke_url}",
-                                            keyboard=self.get_main_keyboard(user_id)
-                                        )
-                                        
-                                        # Списываем баланс
-                                        execute_query_sync(
-                                            "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
-                                            (user_id,)
-                                        )
-                                        logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
-                                    else:
-                                        # Если не удалось сгенерировать минусовку
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message="❌ Не удалось сгенерировать минусовку. Попробуйте позже.",
-                                            keyboard=self.get_main_keyboard(user_id)
-                                        )
-                                else:
-                                    # Если не найдена информация о песне
-                                    self.send_message(
-                                        user_id=user_id,
-                                        message="❌ Не найдена информация о песне. Сначала создайте песню.",
-                                        keyboard=self.get_main_keyboard(user_id)
-                                    )
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка генерации минусовки: {e}")
-                                self.send_message(
-                                    user_id=user_id,
-                                    message="❌ Произошла ошибка при генерации минусовки. Попробуйте позже.",
-                                    keyboard=self.get_main_keyboard(user_id)
-                                )
-                        
-                        # Запускаем генерацию в отдельном потоке
-                        thread = threading.Thread(target=generate_karaoke_thread)
-                        thread.start()
                     else:
                         self.send_message(
                             user_id=user_id,
@@ -2055,7 +1993,58 @@ class VKBot:
                         keyboard=self.get_main_keyboard(user_id)
                     )
             
-            # Обработка кнопки "WAV"
+            # Обработка выбора версии для минусовки
+            elif action == "karaoke_v1" or action == "karaoke_v2":
+                version = 0 if action == "karaoke_v1" else 1
+                logger.info(f"🎤 Запуск минусовки версии {version+1} от пользователя {user_id}")
+                
+                try:
+                    result = execute_query_sync(
+                        "SELECT balance FROM users WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    if result and result[0][0] > 0:
+                        # Списываем баланс СРАЗУ
+                        execute_query_sync(
+                            "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id} ДО генерации минусовки")
+                        
+                        # Отправляем сообщение о начале генерации
+                        version_name = "Версия 1" if version == 0 else "Версия 2"
+                        self.send_message(
+                            user_id=user_id,
+                            message=f"🎤 Создаю минусовку ({version_name})!\n\n⏰ Удаление вокала займет 3-5 минут.\n\nВы получите инструментальную версию вашей песни без вокала 🎸",
+                            keyboard=self.get_cancel_keyboard()
+                        )
+                        
+                        # Создаем новую задачу Celery для минусовки АСИНХРОННО
+                        import uuid
+                        new_task_id = str(uuid.uuid4())
+                        
+                        celery_task = generate_karaoke_task.apply_async(
+                            args=[user_id, task_id_from_payload, version],
+                            kwargs={'task_id': new_task_id},
+                            queue='generation'
+                        )
+                        
+                        logger.info(f"✅ Минусовка задача запущена для user {user_id}: {new_task_id}, версия {version+1}")
+                    else:
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ У вас недостаточно токенов. Пополните баланс!",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при запуске минусовки: {e}")
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Произошла ошибка. Попробуйте позже.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+            
+            # Обработка кнопки "WAV" - показываем выбор версии
             elif action == "wav":
                 logger.info(f"🎵 Запрос на конвертацию в WAV от пользователя {user_id}")
                 
@@ -2066,98 +2055,13 @@ class VKBot:
                         (user_id,)
                     )
                     if result and result[0][0] >= 2:  # WAV стоит 2 токена
-                        # Отправляем сообщение о начале конвертации
+                        # Показываем выбор версии
+                        from vk_keyboards import get_version_selection_keyboard
                         self.send_message(
                             user_id=user_id,
-                            message="⏳ Конвертирую в WAV, подождите 1-2 минуты...",
-                            keyboard=self.get_cancel_keyboard()
+                            message="🎵 **КОНВЕРТАЦИЯ В WAV**\n\nВыбери версию для конвертации в WAV:\n\n🎵 Версия 1 - первый трек\n🎵 Версия 2 - второй трек",
+                            keyboard=get_version_selection_keyboard(task_id_from_payload, "wav")
                         )
-                        
-                        # Запускаем конвертацию в отдельном потоке
-                        import threading
-                        def convert_to_wav_thread():
-                            try:
-                                # Получаем информацию о песне из базы данных
-                                if task_id_from_payload:
-                                    song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
-                                        (task_id_from_payload, user_id)
-                                    )
-                                else:
-                                    song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE user_id = %s ORDER BY id DESC LIMIT 1",
-                                        (user_id,)
-                                    )
-
-                                if song_info and len(song_info) > 0 and song_info[0][0] and song_info[0][1]:
-                                    audio_url = song_info[0][0]
-                                    suno_id = song_info[0][1]
-                                    
-                                    # Конвертируем в WAV через Celery task
-                                    # Получаем task_id оригинальной генерации
-                                    if task_id_from_payload:
-                                        original_task_id = task_id_from_payload
-                                    else:
-                                        task_result = execute_query_sync(
-                                            "SELECT task_id FROM generations WHERE user_id = %s AND suno_audio_id = %s ORDER BY id DESC LIMIT 1",
-                                            (user_id, suno_id)
-                                        )
-                                        original_task_id = task_result[0][0] if task_result else None
-                                    
-                                    if original_task_id:
-                                        # Запускаем Celery task асинхронно
-                                        task_result = generate_wav_task.apply_async(args=(user_id, original_task_id, 0, None))
-                                        result = task_result.get(timeout=300) if task_result else None
-                                        # Celery task возвращает словарь {'status': 'success', 'audio_url': ...}
-                                        wav_url = result.get('audio_url') if result and result.get('status') == 'success' else None
-                                    else:
-                                        wav_url = None
-                                    
-                                    if wav_url:
-                                        # Сохраняем результат в базу данных
-                                        execute_query_sync(
-                                            'INSERT INTO generations (user_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s)',
-                                            (user_id, f"WAV для {suno_id}", wav_url, False, False)
-                                        )
-                                        
-                                        # Отправляем результат пользователю
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message=f"✅ WAV файл готов!\n\nСсылка: {wav_url}\n\n⚠️ Файл доступен 24 часа",
-                                            keyboard=self.get_main_keyboard(user_id)
-                                        )
-                                        
-                                        # Списываем баланс
-                                        execute_query_sync(
-                                            "UPDATE users SET balance = balance - 2 WHERE user_id = %s",
-                                            (user_id,)
-                                        )
-                                        logger.info(f"💰 Списано 2 токена с баланса пользователя {user_id}")
-                                    else:
-                                        # Если не удалось сконвертировать в WAV
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message="❌ Не удалось сконвертировать в WAV. Попробуйте позже.",
-                                            keyboard=self.get_main_keyboard(user_id)
-                                        )
-                                else:
-                                    # Если не найдена информация о песне
-                                    self.send_message(
-                                        user_id=user_id,
-                                        message="❌ Не найдена информация о песне. Сначала создайте песню.",
-                                        keyboard=self.get_main_keyboard(user_id)
-                                    )
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка конвертации в WAV: {e}")
-                                self.send_message(
-                                    user_id=user_id,
-                                    message="❌ Произошла ошибка при конвертации в WAV. Попробуйте позже.",
-                                    keyboard=self.get_main_keyboard(user_id)
-                                )
-                        
-                        # Запускаем конвертацию в отдельном потоке
-                        thread = threading.Thread(target=convert_to_wav_thread)
-                        thread.start()
                     else:
                         self.send_message(
                             user_id=user_id,
@@ -2173,7 +2077,58 @@ class VKBot:
                         keyboard=self.get_main_keyboard(user_id)
                     )
             
-            # Обработка кнопки "Кавер"
+            # Обработка выбора версии для WAV
+            elif action == "wav_v1" or action == "wav_v2":
+                version = 0 if action == "wav_v1" else 1
+                logger.info(f"🎵 Запуск WAV конвертации версии {version+1} от пользователя {user_id}")
+                
+                try:
+                    result = execute_query_sync(
+                        "SELECT balance FROM users WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    if result and result[0][0] >= 2:  # WAV стоит 2 токена
+                        # Списываем баланс СРАЗУ
+                        execute_query_sync(
+                            "UPDATE users SET balance = balance - 2 WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        logger.info(f"💰 Списано 2 токена с баланса пользователя {user_id} ДО конвертации WAV")
+                        
+                        # Отправляем сообщение о начале конвертации
+                        version_name = "Версия 1" if version == 0 else "Версия 2"
+                        self.send_message(
+                            user_id=user_id,
+                            message=f"🎵 Конвертирую в WAV формат ({version_name})!\n\n⏰ Конвертация займет 2-3 минуты.\n\nВы получите профессиональный WAV файл с максимальным качеством 🎧",
+                            keyboard=self.get_cancel_keyboard()
+                        )
+                        
+                        # Создаем новую задачу Celery для WAV АСИНХРОННО
+                        import uuid
+                        new_task_id = str(uuid.uuid4())
+                        
+                        celery_task = generate_wav_task.apply_async(
+                            args=[user_id, task_id_from_payload, version],
+                            kwargs={'task_id': new_task_id},
+                            queue='generation'
+                        )
+                        
+                        logger.info(f"✅ WAV конвертация запущена для user {user_id}: {new_task_id}, версия {version+1}")
+                    else:
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ У вас недостаточно токенов. Для конвертации в WAV нужно 2 токена. Пополните баланс!",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при запуске WAV конвертации: {e}")
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Произошла ошибка. Попробуйте позже.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+            
+            # Обработка кнопки "Кавер" - показываем выбор версии
             elif action == "cover":
                 logger.info(f"🎸 Запрос на создание кавера от пользователя {user_id}")
                 try:
@@ -2182,14 +2137,13 @@ class VKBot:
                         (user_id,)
                     )
                     if result and result[0][0] >= 1:  # Кавер стоит 1 токен
-                        # Отправляем клавиатуру выбора жанра
-                        from vk_keyboards import get_cover_genre_keyboard
+                        # Показываем выбор версии
+                        from vk_keyboards import get_version_selection_keyboard
                         self.send_message(
                             user_id=user_id,
-                            message="🎸 **КАВЕР В НОВОМ ЖАНРЕ**\n\nВыбери жанр для создания кавера:",
-                            keyboard=get_cover_genre_keyboard(task_id_from_payload)
+                            message="🎸 **КАВЕР В НОВОМ ЖАНРЕ**\n\nВыбери версию для создания кавера:\n\n🎵 Версия 1 - первый трек\n🎵 Версия 2 - второй трек",
+                            keyboard=get_version_selection_keyboard(task_id_from_payload, "cover")
                         )
-                        logger.info(f"✅ Пользователь {user_id} получил клавиатуру выбора жанра для кавера (task_id={task_id_from_payload})")
                     else:
                         self.send_message(
                             user_id=user_id,
@@ -2204,103 +2158,79 @@ class VKBot:
                         message="❌ Произошла ошибка. Попробуйте позже.",
                         keyboard=self.get_main_keyboard(user_id)
                     )
+            
+            # Обработка выбора версии для кавера - показываем выбор жанра
+            elif action == "cover_v1" or action == "cover_v2":
+                version = 0 if action == "cover_v1" else 1
+                logger.info(f"🎸 Пользователь {user_id} выбрал версию {version+1} для кавера")
+                
+                try:
+                    result = execute_query_sync(
+                        "SELECT balance FROM users WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    if result and result[0][0] >= 1:  # Кавер стоит 1 токен
+                        # Показываем выбор жанра с версией в payload
+                        from vk_keyboards import get_cover_genre_keyboard
+                        self.send_message(
+                            user_id=user_id,
+                            message="🎸 **Выбери жанр для кавера:**",
+                            keyboard=get_cover_genre_keyboard(task_id_from_payload, version)
+                        )
+                        logger.info(f"✅ Пользователь {user_id} получил клавиатуру выбора жанра (версия {version+1}, task_id={task_id_from_payload})")
+                    else:
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ У вас недостаточно токенов. Для создания кавера нужен 1 токен. Пополните баланс!",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при проверке баланса для кавера: {e}")
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Произошла ошибка. Попробуйте позже.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
 
-            # Обработка выбора жанра для кавера
+            # Обработка выбора жанра для кавера - запускаем генерацию
             elif action == "cover_genre":
                 genre = payload.get('genre', '')
+                version = payload.get('version', 0)  # Получаем версию из payload
                 cover_task_id = task_id_from_payload
-                logger.info(f"🎸 Пользователь {user_id} выбрал жанр '{genre}' для кавера (task_id={cover_task_id})")
+                logger.info(f"🎸 Запуск кавера: user {user_id}, жанр '{genre}', версия {version+1}, task_id={cover_task_id}")
 
                 try:
                     result = execute_query_sync(
                         "SELECT balance FROM users WHERE user_id = %s",
                         (user_id,)
                     )
-                    if result and result[0][0] >= 1:
+                    if result and result[0][0] >= 1:  # Кавер стоит 1 токен
+                        # Списываем баланс СРАЗУ
+                        execute_query_sync(
+                            "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id} ДО генерации кавера")
+                        
+                        # Отправляем сообщение о начале генерации
+                        version_name = "Версия 1" if version == 0 else "Версия 2"
                         self.send_message(
                             user_id=user_id,
-                            message=f"⏳ Создаю кавер в жанре «{genre}», подождите 2-3 минуты...",
+                            message=f"🎸 Создаю кавер в жанре «{genre}» ({version_name})!\n\n⏰ Создание кавера займет 3-5 минут.\n\nВы получите ту же песню в новом стиле 🎭",
                             keyboard=self.get_cancel_keyboard()
                         )
-
-                        import threading
-                        def generate_cover_thread():
-                            try:
-                                # Получаем suno_audio_id по task_id
-                                if cover_task_id:
-                                    song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id, prompt FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
-                                        (cover_task_id, user_id)
-                                    )
-                                else:
-                                    song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id, prompt FROM generations WHERE user_id = %s ORDER BY id DESC LIMIT 1",
-                                        (user_id,)
-                                    )
-
-                                if song_info and len(song_info) > 0 and song_info[0][1]:
-                                    suno_id = song_info[0][1]
-                                    original_prompt = song_info[0][2] or ''
-
-                                    # Генерируем кавер через Celery task
-                                    # Получаем task_id оригинальной генерации
-                                    if cover_task_id:
-                                        original_task_id = cover_task_id
-                                    else:
-                                        task_result = execute_query_sync(
-                                            "SELECT task_id FROM generations WHERE user_id = %s AND suno_audio_id = %s ORDER BY id DESC LIMIT 1",
-                                            (user_id, suno_id)
-                                        )
-                                        original_task_id = task_result[0][0] if task_result else None
-                                    
-                                    if original_task_id:
-                                        # Запускаем Celery task асинхронно
-                                        task_result = generate_cover_task.apply_async(args=(user_id, original_task_id, genre, 0, None))
-                                        result = task_result.get(timeout=300) if task_result else None
-                                        # Celery task возвращает словарь {'status': 'success', 'audio_url': ...}
-                                        cover_url = result.get('audio_url') if result and result.get('status') == 'success' else None
-                                    else:
-                                        cover_url = None
-
-                                    if cover_url:
-                                        # Сохраняем результат в базу данных
-                                        execute_query_sync(
-                                            'INSERT INTO generations (user_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s)',
-                                            (user_id, f"Кавер [{genre}] для {suno_id}", cover_url, False, False)
-                                        )
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message=f"✅ Кавер в жанре «{genre}» готов!\n\nСсылка: {cover_url}",
-                                            keyboard=self.get_main_keyboard(user_id)
-                                        )
-                                        # Списываем 1 токен
-                                        execute_query_sync(
-                                            "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
-                                            (user_id,)
-                                        )
-                                        logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id} за кавер")
-                                    else:
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message="❌ Не удалось создать кавер. Попробуйте позже.",
-                                            keyboard=self.get_main_keyboard(user_id)
-                                        )
-                                else:
-                                    self.send_message(
-                                        user_id=user_id,
-                                        message="❌ Не найдена информация о песне. Сначала создайте песню.",
-                                        keyboard=self.get_main_keyboard(user_id)
-                                    )
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка генерации кавера: {e}")
-                                self.send_message(
-                                    user_id=user_id,
-                                    message="❌ Произошла ошибка при создании кавера. Попробуйте позже.",
-                                    keyboard=self.get_main_keyboard(user_id)
-                                )
-
-                        thread = threading.Thread(target=generate_cover_thread)
-                        thread.start()
+                        
+                        # Создаем новую задачу Celery для кавера АСИНХРОННО
+                        import uuid
+                        new_task_id = str(uuid.uuid4())
+                        
+                        celery_task = generate_cover_task.apply_async(
+                            args=[user_id, cover_task_id, genre, version],
+                            kwargs={'task_id': new_task_id},
+                            queue='generation'
+                        )
+                        
+                        logger.info(f"✅ Кавер задача запущена для user {user_id}: {new_task_id}, жанр '{genre}', версия {version+1}")
                     else:
                         self.send_message(
                             user_id=user_id,
@@ -2337,8 +2267,7 @@ class VKBot:
                         audio_url = song_info[0][0]
                         # Если несколько URL — берём первый
                         try:
-                            import json as _json
-                            urls = _json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
+                            urls = json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
                             share_url = urls[0]
                         except Exception:
                             share_url = audio_url
