@@ -1191,6 +1191,13 @@ class VKBot:
                 
             # Обработка выбора пола вокалиста
             elif vk_state == States.WAITING_VOCAL_GENDER:
+                # СРАЗУ отправляем сообщение о начале генерации (до любых операций)
+                self.send_message(
+                    user_id=user_id,
+                    message="🎵 **Генерация началась!**\n\n🤖 Создаю новую песню...\n⏰ Это займет 3-5 минут",
+                    keyboard=self.get_cancel_keyboard()
+                )
+                
                 # Сохраняем выбранный пол вокалиста
                 vocal_gender = "male"
                 if "женский" in text_lower or text == "👩 Женский":
@@ -1209,7 +1216,7 @@ class VKBot:
                 lyrics = state_data.get('lyrics', '')
                 genre = state_data.get('genre', '')
                 
-                # Отправляем GIF-анимацию и сообщение о начале генерации
+                # Пробуем отправить GIF-анимацию (опционально, без блокировки)
                 gif_path = '/root/albimusic-bot/robot_music.gif'
                 try:
                     # Проверяем, существует ли файл
@@ -1221,12 +1228,6 @@ class VKBot:
                         doc = upload.document_message(gif_path, peer_id=user_id)
                         attachment = f"doc{doc['doc']['owner_id']}_{doc['doc']['id']}"
                         
-                        self.send_message(
-                            user_id=user_id,
-                            message="🎵 **Генерация началась!**\n\n🤖 Создаю новую песню...\n⏰ Это займет 3-5 минут",
-                            keyboard=self.get_cancel_keyboard()
-                        )
-                        
                         # Отправляем GIF как документ с обработкой ошибок
                         try:
                             self.vk.messages.send(
@@ -1236,21 +1237,8 @@ class VKBot:
                             )
                         except Exception as gif_error:
                             logger.warning(f"⚠️ Не удалось отправить GIF: {gif_error}")
-                    else:
-                        # Если GIF не найден, просто отправляем сообщение
-                        self.send_message(
-                            user_id=user_id,
-                            message="🎵 **Генерация началась!**\n\n🤖 Создаю новую песню...\n⏰ Это займет 3-5 минут",
-                            keyboard=self.get_cancel_keyboard()
-                        )
                 except Exception as e:
                     logger.error(f"❌ Ошибка при отправке GIF: {e}")
-                    # Если произошла ошибка, просто отправляем сообщение
-                    self.send_message(
-                        user_id=user_id,
-                        message="🎵 **Генерация началась!**\n\n🤖 Создаю новую песню...\n⏰ Это займет 3-5 минут",
-                        keyboard=self.get_cancel_keyboard()
-                    )
                 
                 # Запускаем генерацию песни
                 try:
@@ -1288,20 +1276,24 @@ class VKBot:
                             if result:
                                 # Проверяем формат результата
                                 if isinstance(result, tuple) and len(result) == 3:
-                                    audio_url, task_id, audio_id = result
+                                    audio_url, suno_task_id, suno_audio_id = result
                                 elif isinstance(result, str):
                                     audio_url = result
-                                    task_id = None
-                                    audio_id = None
+                                    suno_task_id = None
+                                    suno_audio_id = None
                                 else:
                                     audio_url = str(result)
-                                    task_id = None
-                                    audio_id = None
+                                    suno_task_id = None
+                                    suno_audio_id = None
+                                
+                                # Генерируем UUID для task_id базы данных
+                                import uuid
+                                db_task_id = str(uuid.uuid4())
                                 
                                 # Сохраняем результат в базу данных
                                 execute_query_sync(
-                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s)',
-                                    (user_id, task_id, style, audio_url, False, use_custom_mode, audio_id)
+                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
+                                    (user_id, db_task_id, style, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id)
                                 )
                                 
                                 # Импортируем клавиатуру с опциями
@@ -1338,7 +1330,7 @@ class VKBot:
                                 )
                                 
                                 # Отправляем отдельное сообщение с опциями (минусовка, кавер и т.д.)
-                                if task_id:
+                                if suno_task_id:
                                     options_text = (
                                         "💎 Что можно сделать с этой песней:\n\n"
                                         "🎤 Минусовка — версия без вокала\n"
@@ -1350,7 +1342,7 @@ class VKBot:
                                     self.send_message(
                                         user_id=user_id,
                                         message=options_text,
-                                        keyboard=get_song_options_keyboard(task_id)
+                                        keyboard=get_song_options_keyboard(db_task_id)
                                     )
                                 
                                 # Списываем баланс
@@ -1452,21 +1444,25 @@ class VKBot:
                         if result:
                             # Проверяем формат результата (может быть tuple или строка)
                             if isinstance(result, tuple) and len(result) == 3:
-                                audio_url, task_id, audio_id = result
+                                audio_url, suno_task_id, suno_audio_id = result
                             elif isinstance(result, str):
                                 audio_url = result
-                                task_id = None
-                                audio_id = None
+                                suno_task_id = None
+                                suno_audio_id = None
                             else:
                                 audio_url = str(result)
-                                task_id = None
-                                audio_id = None
+                                suno_task_id = None
+                                suno_audio_id = None
+                            
+                            # Генерируем UUID для task_id базы данных
+                            import uuid
+                            db_task_id = str(uuid.uuid4())
                             
                             # Сохраняем в БД
                             try:
                                 execute_query_sync(
-                                    'INSERT INTO generations (user_id, prompt, audio_url, is_free, custom_mode, task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s)',
-                                    (_uid, _genre, audio_url, False, False, task_id, audio_id)
+                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
+                                    (_uid, db_task_id, _genre, audio_url, False, False, suno_task_id, suno_audio_id)
                                 )
                             except Exception as db_err:
                                 logger.error(f"❌ Ошибка сохранения музыки в БД: {db_err}")
@@ -1676,13 +1672,17 @@ class VKBot:
                 )
                 
                 if result:
-                    audio_url, task_id, audio_id = result
+                    audio_url, suno_task_id, suno_audio_id = result
+                    
+                    # Генерируем UUID для task_id базы данных
+                    import uuid
+                    db_task_id = str(uuid.uuid4())
                     
                     # Сохраняем результат в базу данных
                     try:
                         execute_query_sync(
-                            'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s)',
-                            (user_id, task_id, genre, audio_url, False, use_custom_mode, audio_id)
+                            'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
+                            (user_id, db_task_id, genre, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id)
                         )
                         logger.info(f"✅ Результат генерации песни сохранен в базе данных для пользователя {user_id}")
                     except Exception as e:
@@ -1721,7 +1721,7 @@ class VKBot:
                     self.send_message(
                         user_id=user_id,
                         message=message_text,
-                        keyboard=get_song_options_keyboard(task_id)
+                        keyboard=get_song_options_keyboard(db_task_id)
                     )
                     
                     # Списываем баланс

@@ -20,6 +20,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Функция для отправки результатов в ВК
+def send_vk_result(user_id, message, audio_url=None):
+    """Отправляет результат генерации пользователю ВК"""
+    try:
+        import vk_api
+        from vk_config import VK_TOKEN
+        from vk_api.utils import get_random_id
+        
+        vk_session = vk_api.VkApi(token=VK_TOKEN)
+        vk = vk_session.get_api()
+        
+        params = {
+            'user_id': user_id,
+            'message': message,
+            'random_id': get_random_id()
+        }
+        
+        vk.messages.send(**params)
+        logger.info(f"✅ Результат отправлен пользователю ВК {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки результата в ВК для пользователя {user_id}: {e}")
+        return False
+
 # Словарь перевода русских музыкальных терминов для Suno API
 MUSIC_STYLE_TRANSLATIONS = {
     # Жанры
@@ -1164,8 +1188,26 @@ def generate_karaoke_task(self, user_id, original_task_id, version=0, task_id=No
             logger.error(f"🔥 Ошибка сохранения результата минусовка {task_id}: {save_error}")
 
         if result_status == 'completed':
+            # Отправляем результат пользователю ВК
+            try:
+                # Парсим URL (может быть JSON массив)
+                urls = json.loads(output_audio_url) if output_audio_url and output_audio_url.startswith('[') else [output_audio_url]
+                url_to_send = urls[0] if urls else output_audio_url
+                
+                message = f"✅ Ваша минусовка готова!\n\n🎸 Версия без вокала - готова к использованию!\n\n🔗 Слушать: {url_to_send}"
+                send_vk_result(user_id, message, url_to_send)
+            except Exception as notify_error:
+                logger.error(f"❌ Ошибка отправки уведомления о минусовке: {notify_error}")
+            
             return {'status': 'success', 'user_id': user_id, 'audio_url': output_audio_url, 'task_id': task_id}
         else:
+            # Отправляем уведомление об ошибке
+            try:
+                error_msg = f"❌ Не удалось создать минусовку.\n\n{result_message}\n\nПопробуйте еще раз или обратитесь в поддержку."
+                send_vk_result(user_id, error_msg)
+            except Exception as notify_error:
+                logger.error(f"❌ Ошибка отправки уведомления об ошибке: {notify_error}")
+            
             return {'status': 'error', 'message': result_message, 'task_id': task_id}
 
 @celery_app.task(bind=True, name='generate_cover_task', max_retries=3, default_retry_delay=30, time_limit=600, soft_time_limit=480)
@@ -1262,8 +1304,26 @@ def generate_cover_task(self, user_id, original_task_id, new_style, version=0, t
             logger.error(f"🔥 Ошибка сохранения результата кавера {task_id}: {save_error}")
 
         if result_status == 'completed':
+            # Отправляем результат пользователю ВК
+            try:
+                # Парсим URL (может быть JSON массив)
+                urls = json.loads(audio_url) if audio_url and audio_url.startswith('[') else [audio_url]
+                url_to_send = urls[0] if urls else audio_url
+                
+                message = f"✅ Ваш кавер готов!\n\n🎭 Та же песня в новом стиле: {new_style}\n\n🔗 Слушать: {url_to_send}"
+                send_vk_result(user_id, message, url_to_send)
+            except Exception as notify_error:
+                logger.error(f"❌ Ошибка отправки уведомления о кавере: {notify_error}")
+            
             return {'status': 'success', 'user_id': user_id, 'audio_url': audio_url, 'task_id': task_id}
         else:
+            # Отправляем уведомление об ошибке
+            try:
+                error_msg = f"❌ Не удалось создать кавер.\n\n{result_message}\n\nПопробуйте еще раз или обратитесь в поддержку."
+                send_vk_result(user_id, error_msg)
+            except Exception as notify_error:
+                logger.error(f"❌ Ошибка отправки уведомления об ошибке: {notify_error}")
+            
             return {'status': 'error', 'message': result_message, 'task_id': task_id}
 
 @celery_app.task(bind=True, name='generate_karaoke_from_upload_task', max_retries=3, default_retry_delay=30, time_limit=600, soft_time_limit=480)
@@ -1475,8 +1535,22 @@ def generate_wav_task(self, user_id, original_task_id, version=0, task_id=None):
             logger.error(f"🔥 Ошибка сохранения результата WAV {task_id}: {save_error}")
 
         if result_status == 'completed':
+            # Отправляем результат пользователю ВК
+            try:
+                message = f"✅ Ваш WAV файл готов!\n\n💎 Профессиональное качество - готов!\n\n🔗 Скачать: {output_wav_url}"
+                send_vk_result(user_id, message, output_wav_url)
+            except Exception as notify_error:
+                logger.error(f"❌ Ошибка отправки уведомления о WAV: {notify_error}")
+            
             return {'status': 'success', 'user_id': user_id, 'audio_url': output_wav_url, 'task_id': task_id}
         else:
+            # Отправляем уведомление об ошибке
+            try:
+                error_msg = f"❌ Не удалось конвертировать в WAV.\n\n{result_message}\n\nПопробуйте еще раз или обратитесь в поддержку."
+                send_vk_result(user_id, error_msg)
+            except Exception as notify_error:
+                logger.error(f"❌ Ошибка отправки уведомления об ошибке: {notify_error}")
+            
             return {'status': 'error', 'message': result_message, 'task_id': task_id}
 
 @celery_app.task(bind=True, name='generate_video_task', max_retries=3, default_retry_delay=30, time_limit=600, soft_time_limit=480)
