@@ -294,9 +294,9 @@ class VKBot:
                 # За 24 часа
                 payments_24h = execute_query_sync(
                     """
-                    SELECT COUNT(*), SUM(amount)
+                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
                     FROM payments
-                    WHERE created_at > NOW() - INTERVAL '24 hours'
+                    WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'
                     """
                 )
                 payments_count_24h = payments_24h[0][0] if payments_24h and payments_24h[0][0] else 0
@@ -305,9 +305,9 @@ class VKBot:
                 # За 7 дней
                 payments_7d = execute_query_sync(
                     """
-                    SELECT COUNT(*), SUM(amount)
+                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
                     FROM payments
-                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'
                     """
                 )
                 payments_count_7d = payments_7d[0][0] if payments_7d and payments_7d[0][0] else 0
@@ -316,13 +316,15 @@ class VKBot:
                 # Всего
                 payments_all = execute_query_sync(
                     """
-                    SELECT COUNT(*), SUM(amount)
+                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
                     FROM payments
+                    WHERE status = 'succeeded'
                     """
                 )
                 payments_count_all = payments_all[0][0] if payments_all and payments_all[0][0] else 0
-                payments_sum_all = int(payments_all[1]) if payments_all else 0
-            except Exception:
+                payments_sum_all = int(payments_all[0][1]) if payments_all and payments_all[0][1] else 0
+            except Exception as e:
+                logger.error(f"❌ Ошибка получения статистики платежей: {e}")
                 # Если таблица payments не существует
                 payments_count_24h = 0
                 payments_sum_24h = 0
