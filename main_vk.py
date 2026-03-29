@@ -1515,22 +1515,7 @@ class VKBot:
 
             # Если команда не была обработана выше
             if not command_handled:
-                # Проверяем, находится ли пользователь в каком-то состоянии
-                current_state = self.user_states.get(user_id)
-                if current_state:
-                    # Обработка состояний (FSM)
-                    if current_state in [UserState.WAITING_SONG_DESCRIPTION, UserState.WAITING_INSTRUMENTAL_DESCRIPTION]:
-                        self.send_message(
-                            user_id=user_id,
-                            message="⏳ Спасибо! Ваш запрос принят в обработку...",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
-                        self.reset_state(user_id)
-                        command_handled = True
-                        return
-                
                 # Если команда всё ещё не обработана - отправляем сообщение о неизвестной команде
-                if not command_handled:
                     logger.warning(f"❓ Неизвестная команда от {user_id}: '{text}' (в нижнем регистре: '{text_lower}')")
                     keyboard = self.get_main_keyboard(user_id)
                     if keyboard:
@@ -2004,7 +1989,9 @@ class VKBot:
                                     if original_task_id:
                                         # Запускаем Celery task асинхронно
                                         task_result = generate_karaoke_task.apply_async(args=(user_id, original_task_id, 0, None))
-                                        karaoke_url = task_result.get(timeout=300) if task_result else None
+                                        result = task_result.get(timeout=300) if task_result else None
+                                        # Celery task возвращает словарь {'status': 'success', 'audio_url': ...}
+                                        karaoke_url = result.get('audio_url') if result and result.get('status') == 'success' else None
                                     else:
                                         karaoke_url = None
                                     
@@ -2120,7 +2107,9 @@ class VKBot:
                                     if original_task_id:
                                         # Запускаем Celery task асинхронно
                                         task_result = generate_wav_task.apply_async(args=(user_id, original_task_id, 0, None))
-                                        wav_url = task_result.get(timeout=300) if task_result else None
+                                        result = task_result.get(timeout=300) if task_result else None
+                                        # Celery task возвращает словарь {'status': 'success', 'audio_url': ...}
+                                        wav_url = result.get('audio_url') if result and result.get('status') == 'success' else None
                                     else:
                                         wav_url = None
                                     
@@ -2267,7 +2256,9 @@ class VKBot:
                                     if original_task_id:
                                         # Запускаем Celery task асинхронно
                                         task_result = generate_cover_task.apply_async(args=(user_id, original_task_id, genre, 0, None))
-                                        cover_url = task_result.get(timeout=300) if task_result else None
+                                        result = task_result.get(timeout=300) if task_result else None
+                                        # Celery task возвращает словарь {'status': 'success', 'audio_url': ...}
+                                        cover_url = result.get('audio_url') if result and result.get('status') == 'success' else None
                                     else:
                                         cover_url = None
 
