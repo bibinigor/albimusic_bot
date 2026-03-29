@@ -340,7 +340,7 @@ def get_lyrics_variants_keyboard_with_two_options():
     keyboard.add_button('🔄 Сгенерировать другие', color=VkKeyboardColor.POSITIVE)
     
     return keyboard
-def get_payment_keyboard():
+def get_payment_tariffs_keyboard():
     """Клавиатура с тарифами оплаты (inline-кнопки с callback)"""
     keyboard = VkKeyboard(inline=True)
     
@@ -406,5 +406,32 @@ def get_track_actions_keyboard(task_id, has_two_variants=False):
         color=VkKeyboardColor.SECONDARY,
         payload=json.dumps({"action": "wav", "task_id": str(task_id)})
     )
+    
+    return keyboard
+
+def get_music_result_keyboard(urls, task_id=None):
+    """Клавиатура с ссылками на варианты музыки (openlink-кнопки)"""
+    keyboard = VkKeyboard(inline=True)
+    
+    # Парсим URL (может быть JSON массив или одна ссылка)
+    try:
+        import json as _json
+        url_list = _json.loads(urls) if isinstance(urls, str) and urls.startswith('[') else [urls]
+    except Exception:
+        url_list = [urls] if isinstance(urls, str) else urls
+    
+    # Добавляем кнопки для каждого варианта
+    for i, url in enumerate(url_list, 1):
+        if len(url_list) > 1:
+            label = f"🎧 Слушать вариант {i}"
+        else:
+            label = "🎧 Слушать"
+        
+        keyboard.add_openlink_button(
+            label=label,
+            link=url
+        )
+        if i < len(url_list):  # Добавляем новую строку между кнопками
+            keyboard.add_line()
     
     return keyboard

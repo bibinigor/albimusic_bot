@@ -18,7 +18,16 @@ import aioredis
 from vk_config import VK_TOKEN, VK_GROUP_ID, ADMIN_IDS
 from vk_states import States, VKStateManager
 from db_utils import execute_query_sync
-from celery_tasks import translate_style_to_english
+from celery_tasks import (
+    translate_style_to_english,
+    generate_suno_lyrics_sync,
+    generate_suno_music_sync,
+    generate_song_task,
+    generate_music_task,
+    generate_karaoke_task,
+    generate_cover_task,
+    generate_wav_task
+)
 
 # Настройка логирования
 logging.basicConfig(
@@ -607,22 +616,15 @@ class VKBot:
                         (user_id,)
                     )
                     balance_num = result[0][0] if result else 0
-                    balance_str = f"💰 {balance_num} токенов" if balance_num > 0 else "❌ 0 токенов"
                     balance_msg = (
-                        f"💰 Ваш баланс: {balance_str}\n\n"
+                        f"💰 Ваш баланс: {balance_num} токенов\n\n"
                         f"💳 Выберите тариф для пополнения:\n\n"
-                        f"💫 1 токен (2 песни) — 50₽\n"
-                        f"💳 10 токенов (20 песен) — 250₽\n"
-                        f"🔥 25 токенов (50 песен) — 500₽\n"
-                        f"⭐ 60 токенов (120 песен) — 1000₽\n"
-                        f"💎 140 токенов (280 песен) — 2000₽\n\n"
-                        f"🌟 Пригласи друга — получи 2 токена бесплатно!\n"
                         f"🎁 Первый токен в подарок — для новых пользователей!"
                     )
                     
                     # Создаем клавиатуру с тарифами
-                    from vk_keyboards import get_payment_keyboard
-                    payment_keyboard = get_payment_keyboard()
+                    from vk_keyboards import get_payment_tariffs_keyboard
+                    payment_keyboard = get_payment_tariffs_keyboard()
                     
                     self.send_message(
                         user_id=user_id,
@@ -805,8 +807,6 @@ class VKBot:
                 
                 # Генерируем два варианта текста песни на основе идеи
                 try:
-                    from celery_tasks import generate_suno_lyrics_sync
-                    
                     # Ограничиваем длину идеи
                     idea = text[:500]
                     
@@ -1025,8 +1025,6 @@ class VKBot:
                         
                         # Генерируем новые варианты текста
                         try:
-                            from celery_tasks import generate_suno_lyrics_sync
-                            
                             # Ограничиваем длину идеи
                             idea = song_idea[:500]
                             
@@ -1229,9 +1227,6 @@ class VKBot:
                 
                 # Запускаем генерацию песни
                 try:
-                    # Импортируем функцию для генерации песни
-                    from celery_tasks import generate_suno_song_sync
-                    
                     # Переводим жанр на английский для Suno API
                     translated_genre = translate_style_to_english(genre, add_improvements=False)
                     logger.info(f"🔄 Перевод жанра для песни: '{genre}' → '{translated_genre}'")
@@ -1254,11 +1249,27 @@ class VKBot:
                     import threading
                     def generate_song_thread():
                         try:
-                            # Генерируем песню
-                            result = generate_suno_song_sync(lyrics, style)
+                            # Генерируем песню (используем generate_suno_music_sync с параметром is_song=True)
+                            result = generate_suno_music_sync(
+                                prompt=lyrics,
+                                is_song=True,
+                                custom_mode=use_custom_mode,
+                                user_id=user_id,
+                                style=style
+                            )
                             
                             if result:
-                                audio_url, task_id, audio_id = result
+                                # Проверяем формат результата
+                                if isinstance(result, tuple) and len(result) == 3:
+                                    audio_url, task_id, audio_id = result
+                                elif isinstance(result, str):
+                                    audio_url = result
+                                    task_id = None
+                                    audio_id = None
+                                else:
+                                    audio_url = str(result)
+                                    task_id = None
+                                    audio_id = None
                                 
                                 # Сохраняем результат в базу данных
                                 execute_query_sync(
@@ -1270,38 +1281,51 @@ class VKBot:
                                 from vk_keyboards import get_song_options_keyboard
                                 
                                 # Подготовка сообщения с результатом
-                                message_text = f"✅ Ваша песня готова!\n\nЖанр: {genre}\n\n"
+                                message_text = f"✅ Ваша песня готова!\n\n🎵 Жанр: {genre}\n\n"
                                 
                                 # Проверяем, содержит ли audio_url несколько ссылок (JSON массив)
                                 try:
                                     import json
-                                    audio_urls = json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
-                                    
-                                    # Если есть несколько ссылок, добавляем их все в сообщение
-                                    if len(audio_urls) > 1:
-                                        message_text += "🎵 **Варианты песни:**\n\n"
-                                        for i, url in enumerate(audio_urls, 1):
-                                            message_text += f"Вариант {i}: {url}\n\n"
+                                    if isinstance(audio_url, str):
+                                        audio_urls = json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
                                     else:
-                                        message_text += f"Ссылка: {audio_url}\n\n"
+                                        audio_urls = [str(audio_url)]
+                                    
+                                    # Если есть несколько ссылок, указываем количество вариантов
+                                    if len(audio_urls) > 1:
+                                        message_text += f"🎼 Сгенерировано {len(audio_urls)} варианта\n\n"
+                                    
+                                    message_text += "👇 Выберите вариант для прослушивания:"
                                 except Exception as json_error:
-                                    # Если не удалось распарсить JSON, логируем ошибку и используем строку как есть
+                                    # Если не удалось распарсить JSON, логируем ошибку
                                     logger.error(f"❌ Ошибка при парсинге JSON аудио URL: {json_error}")
-                                    message_text += f"Ссылка: {audio_url}\n\n"
+                                    message_text += "👇 Слушайте вашу песню:"
                                 
-                                # Добавляем информацию о возможных действиях
-                                message_text += "💎 **Что можно сделать с этой песней:**\n\n"
-                                message_text += "🎤 **Минусовка** (1 токен) — версия без вокала для исполнения\n"
-                                message_text += "🎸 **Кавер** (1 токен) — перепой в другом стиле/жанре\n"
-                                message_text += "🎵 **В WAV** (2 токена) — конвертируй в WAV формат для профи\n"
-                                message_text += "🔗 **Поделиться** — опубликуй трек на своей странице ВКонтакте"
+                                # Отправляем сообщение с кнопками для прослушивания
+                                from vk_keyboards import get_music_result_keyboard
+                                song_keyboard = get_music_result_keyboard(audio_url)
                                 
-                                # Отправляем результат пользователю с клавиатурой опций
                                 self.send_message(
                                     user_id=user_id,
                                     message=message_text,
-                                    keyboard=get_song_options_keyboard(task_id)
+                                    keyboard=song_keyboard
                                 )
+                                
+                                # Отправляем отдельное сообщение с опциями (минусовка, кавер и т.д.)
+                                if task_id:
+                                    options_text = (
+                                        "💎 Что можно сделать с этой песней:\n\n"
+                                        "🎤 Минусовка — версия без вокала\n"
+                                        "🎸 Кавер — перепой в другом жанре\n"
+                                        "🎵 В WAV — конвертация в WAV формат\n"
+                                        "🔗 Поделиться — опубликовать трек"
+                                    )
+                                    
+                                    self.send_message(
+                                        user_id=user_id,
+                                        message=options_text,
+                                        keyboard=get_song_options_keyboard(task_id)
+                                    )
                                 
                                 # Списываем баланс
                                 execute_query_sync(
@@ -1318,6 +1342,7 @@ class VKBot:
                                 )
                         except Exception as e:
                             logger.error(f"❌ Ошибка генерации песни: {e}")
+                            logger.error(traceback.format_exc())
                             self.send_message(
                                 user_id=user_id,
                                 message="❌ Произошла ошибка при генерации песни. Попробуйте позже.",
@@ -1391,16 +1416,31 @@ class VKBot:
 
                 def generate_instrumental_thread():
                     try:
-                        from celery_tasks import generate_suno_music_sync
+                        result = generate_suno_music_sync(
+                            prompt=_genre,
+                            is_song=False,
+                            custom_mode=False,
+                            user_id=_uid
+                        )
 
-                        audio_url = generate_suno_music_sync(_genre)
-
-                        if audio_url:
+                        if result:
+                            # Проверяем формат результата (может быть tuple или строка)
+                            if isinstance(result, tuple) and len(result) == 3:
+                                audio_url, task_id, audio_id = result
+                            elif isinstance(result, str):
+                                audio_url = result
+                                task_id = None
+                                audio_id = None
+                            else:
+                                audio_url = str(result)
+                                task_id = None
+                                audio_id = None
+                            
                             # Сохраняем в БД
                             try:
                                 execute_query_sync(
-                                    'INSERT INTO generations (user_id, prompt, audio_url, is_free, custom_mode) VALUES (%s, %s, %s, %s, %s)',
-                                    (_uid, _genre, audio_url, False, False)
+                                    'INSERT INTO generations (user_id, prompt, audio_url, is_free, custom_mode, task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s)',
+                                    (_uid, _genre, audio_url, False, False, task_id, audio_id)
                                 )
                             except Exception as db_err:
                                 logger.error(f"❌ Ошибка сохранения музыки в БД: {db_err}")
@@ -1408,27 +1448,38 @@ class VKBot:
                             # Парсим URL: может быть JSON-массив из 2 ссылок
                             try:
                                 import json as _json
-                                urls = _json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
+                                if isinstance(audio_url, str):
+                                    urls = _json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
+                                else:
+                                    urls = [str(audio_url)]
                             except Exception:
-                                urls = [audio_url]
+                                urls = [str(audio_url)]
 
-                            if len(urls) >= 2:
-                                result_msg = (
-                                    f"✅ Ваша инструментальная музыка готова!\n\n"
-                                    f"🎵 Жанр: {_genre}\n\n"
-                                    f"🎧 Вариант 1:\n{urls[0]}\n\n"
-                                    f"🎧 Вариант 2:\n{urls[1]}"
-                                )
-                            else:
-                                result_msg = (
-                                    f"✅ Ваша инструментальная музыка готова!\n\n"
-                                    f"🎵 Жанр: {_genre}\n\n"
-                                    f"🔗 Слушать: {urls[0]}"
-                                )
+                            # Красивое сообщение
+                            result_msg = (
+                                f"✅ Ваша инструментальная музыка готова!\n\n"
+                                f"🎵 Жанр: {_genre}\n\n"
+                            )
+                            
+                            if len(urls) > 1:
+                                result_msg += f"🎼 Сгенерировано {len(urls)} варианта\n\n"
+                            
+                            result_msg += "👇 Выберите вариант для прослушивания:"
 
+                            # Отправляем сообщение с красивыми кнопками
+                            from vk_keyboards import get_music_result_keyboard
+                            music_keyboard = get_music_result_keyboard(audio_url)
+                            
                             self.send_message(
                                 user_id=_uid,
                                 message=result_msg,
+                                keyboard=music_keyboard
+                            )
+                            
+                            # Затем отправляем главное меню отдельным сообщением
+                            self.send_message(
+                                user_id=_uid,
+                                message="Что делаем дальше?",
                                 keyboard=self.get_main_keyboard(_uid)
                             )
 
@@ -1449,6 +1500,7 @@ class VKBot:
                             )
                     except Exception as e:
                         logger.error(f"❌ Ошибка в потоке генерации музыки: {e}")
+                        logger.error(traceback.format_exc())
                         self.send_message(
                             user_id=_uid,
                             message="❌ Произошла ошибка при генерации музыки. Попробуйте позже.",
@@ -1521,10 +1573,13 @@ class VKBot:
             
             # Запускаем генерацию музыки через Celery
             try:
-                from celery_tasks import generate_suno_music_sync
-                
                 # Генерируем музыку
-                audio_url = generate_suno_music_sync(genre)
+                audio_url = generate_suno_music_sync(
+                    prompt=genre,
+                    is_song=False,
+                    custom_mode=False,
+                    user_id=user_id
+                )
                 
                 if audio_url:
                     # Сохраняем результат в базу данных
@@ -1595,15 +1650,19 @@ class VKBot:
             
             # Запускаем генерацию песни через Celery
             try:
-                from celery_tasks import generate_suno_song_sync
-                
                 # Проверяем длину текста песни и автоматически включаем customMode для длинных текстов
                 use_custom_mode = len(lyrics) > 500
                 if use_custom_mode:
                     logger.info(f"ℹ️ Автоматически включен customMode из-за длины текста ({len(lyrics)} символов)")
                 
-                # Генерируем песню
-                result = generate_suno_song_sync(lyrics, genre)
+                # Генерируем песню (используем generate_suno_music_sync с is_song=True)
+                result = generate_suno_music_sync(
+                    prompt=lyrics,
+                    is_song=True,
+                    custom_mode=use_custom_mode,
+                    user_id=user_id,
+                    style=genre
+                )
                 
                 if result:
                     audio_url, task_id, audio_id = result
@@ -1718,7 +1777,128 @@ class VKBot:
             # Обработка различных действий из payload
             action = payload.get('action')
             task_id_from_payload = payload.get('task_id', '')
-            if action == "create_music":
+            
+            # Обработка кнопок оплаты
+            if action == "payment":
+                amount = payload.get('amount', 0)
+                logger.info(f"💳 Запрос на оплату от пользователя {user_id}, сумма: {amount}₽")
+                
+                try:
+                    # Импортируем модуль для работы с YooKassa
+                    try:
+                        from yookassa import Configuration, Payment
+                        import uuid
+                        from vk_config import YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY
+                        Configuration.account_id = YOOKASSA_SHOP_ID
+                        Configuration.secret_key = YOOKASSA_SECRET_KEY
+                    except ImportError as e:
+                        logger.error(f"❌ Не найдены настройки YooKassa: {e}")
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ Оплата временно недоступна. Обратитесь в поддержку.",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        return
+                    
+                    # Определяем количество токенов по сумме
+                    tokens_map = {
+                        50: 1,
+                        250: 10,
+                        500: 25,
+                        1000: 60,
+                        2000: 140
+                    }
+                    tokens = tokens_map.get(amount, 0)
+                    
+                    if tokens == 0:
+                        logger.error(f"❌ Неизвестная сумма оплаты: {amount}")
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ Ошибка при создании платежа. Попробуйте позже.",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        return
+                    
+                    # Создаем платеж
+                    idempotence_key = str(uuid.uuid4())
+                    payment = Payment.create({
+                        "amount": {
+                            "value": str(amount),
+                            "currency": "RUB"
+                        },
+                        "confirmation": {
+                            "type": "redirect",
+                            "return_url": "https://vk.com/club235442407"
+                        },
+                        "capture": True,
+                        "description": f"Пополнение баланса: {tokens} токенов",
+                        "metadata": {
+                            "user_id": str(user_id),
+                            "tokens": str(tokens),
+                            "platform": "vk"
+                        }
+                    }, idempotence_key)
+                    
+                    # Получаем ссылку на оплату
+                    payment_url = payment.confirmation.confirmation_url
+                    
+                    # Сохраняем информацию о платеже в БД
+                    try:
+                        execute_query_sync(
+                            """INSERT INTO payments (user_id, payment_id, amount, status, platform)
+                               VALUES (%s, %s, %s, 'pending', 'vk')
+                               ON CONFLICT (payment_id) DO NOTHING""",
+                            (user_id, payment.id, amount)
+                        )
+                        # Сохраняем tokens в metadata платежа, так как в таблице нет колонки tokens
+                        logger.info(f"💾 Платеж сохранен: payment_id={payment.id}, amount={amount}, tokens={tokens}")
+                    except Exception as db_err:
+                        logger.warning(f"⚠️ Ошибка сохранения платежа в БД: {db_err}")
+                    
+                    # Отправляем ссылку на оплату
+                    from vk_keyboards import get_payment_keyboard
+                    payment_keyboard = get_payment_keyboard(payment_url)
+                    
+                    self.send_message(
+                        user_id=user_id,
+                        message=f"💳 Оплата {tokens} токенов за {amount}₽\n\n👉 Нажмите кнопку ниже для перехода к оплате:",
+                        keyboard=payment_keyboard
+                    )
+                    
+                    logger.info(f"✅ Создан платеж для пользователя {user_id}: {payment.id}")
+                    return  # Важно: выходим, чтобы не отправлять "Команда получена"
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при создании платежа: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Произошла ошибка при создании платежа. Попробуйте позже или обратитесь в поддержку.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+                    return
+            
+            # Обработка кнопки "Пригласить друга"
+            elif action == "invite_friend":
+                logger.info(f"🌟 Запрос реферальной ссылки от пользователя {user_id}")
+                
+                # Генерируем реферальную ссылку
+                referral_link = f"https://vk.com/club235442407?ref={user_id}"
+                
+                self.send_message(
+                    user_id=user_id,
+                    message=(
+                        f"🌟 **ПРИГЛАСИ ДРУГА И ПОЛУЧИ БОНУС!**\n\n"
+                        f"🎁 За каждого друга получишь 2 ТОКЕНА бесплатно!\n\n"
+                        f"📎 Твоя реферальная ссылка:\n{referral_link}\n\n"
+                        f"💡 Отправь её другу, и как только он создаст первую песню — "
+                        f"вы оба получите по 2 токена в подарок!"
+                    ),
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+            
+            elif action == "create_music":
                 print("Обработка кнопки 'Создать музыку'")
                 logger.info(f"🎶 Запрос на создание инструментальной музыки от пользователя {user_id}")
                 
@@ -1793,14 +1973,11 @@ class VKBot:
                         import threading
                         def generate_karaoke_thread():
                             try:
-                                # Импортируем функцию для генерации минусовки
-                                from celery_tasks import generate_suno_karaoke_sync
-                                
                                 # Получаем информацию о песне из базы данных
                                 if task_id_from_payload:
                                     song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s LIMIT 1",
-                                        (task_id_from_payload,)
+                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
+                                        (task_id_from_payload, user_id)
                                     )
                                 else:
                                     song_info = execute_query_sync(
@@ -1808,12 +1985,28 @@ class VKBot:
                                         (user_id,)
                                     )
 
-                                if song_info and song_info[0][0] and song_info[0][1]:
+                                if song_info and len(song_info) > 0 and song_info[0][0] and song_info[0][1]:
                                     audio_url = song_info[0][0]
                                     suno_id = song_info[0][1]
                                     
-                                    # Генерируем минусовку
-                                    karaoke_url = generate_suno_karaoke_sync(suno_id)
+                                    # Генерируем минусовку через Celery task
+                                    # Нужно получить task_id оригинальной генерации
+                                    if task_id_from_payload:
+                                        original_task_id = task_id_from_payload
+                                    else:
+                                        # Получаем последний task_id
+                                        task_result = execute_query_sync(
+                                            "SELECT task_id FROM generations WHERE user_id = %s AND suno_audio_id = %s ORDER BY id DESC LIMIT 1",
+                                            (user_id, suno_id)
+                                        )
+                                        original_task_id = task_result[0][0] if task_result else None
+                                    
+                                    if original_task_id:
+                                        # Запускаем Celery task асинхронно
+                                        task_result = generate_karaoke_task.apply_async(args=(user_id, original_task_id, 0, None))
+                                        karaoke_url = task_result.get(timeout=300) if task_result else None
+                                    else:
+                                        karaoke_url = None
                                     
                                     if karaoke_url:
                                         # Сохраняем результат в базу данных
@@ -1897,14 +2090,11 @@ class VKBot:
                         import threading
                         def convert_to_wav_thread():
                             try:
-                                # Импортируем функцию для конвертации в WAV
-                                from celery_tasks import generate_suno_wav_sync
-                                
                                 # Получаем информацию о песне из базы данных
                                 if task_id_from_payload:
                                     song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s LIMIT 1",
-                                        (task_id_from_payload,)
+                                        "SELECT audio_url, suno_audio_id FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
+                                        (task_id_from_payload, user_id)
                                     )
                                 else:
                                     song_info = execute_query_sync(
@@ -1912,12 +2102,27 @@ class VKBot:
                                         (user_id,)
                                     )
 
-                                if song_info and song_info[0][0] and song_info[0][1]:
+                                if song_info and len(song_info) > 0 and song_info[0][0] and song_info[0][1]:
                                     audio_url = song_info[0][0]
                                     suno_id = song_info[0][1]
                                     
-                                    # Конвертируем в WAV
-                                    wav_url = generate_suno_wav_sync(suno_id)
+                                    # Конвертируем в WAV через Celery task
+                                    # Получаем task_id оригинальной генерации
+                                    if task_id_from_payload:
+                                        original_task_id = task_id_from_payload
+                                    else:
+                                        task_result = execute_query_sync(
+                                            "SELECT task_id FROM generations WHERE user_id = %s AND suno_audio_id = %s ORDER BY id DESC LIMIT 1",
+                                            (user_id, suno_id)
+                                        )
+                                        original_task_id = task_result[0][0] if task_result else None
+                                    
+                                    if original_task_id:
+                                        # Запускаем Celery task асинхронно
+                                        task_result = generate_wav_task.apply_async(args=(user_id, original_task_id, 0, None))
+                                        wav_url = task_result.get(timeout=300) if task_result else None
+                                    else:
+                                        wav_url = None
                                     
                                     if wav_url:
                                         # Сохраняем результат в базу данных
@@ -2032,12 +2237,10 @@ class VKBot:
                         import threading
                         def generate_cover_thread():
                             try:
-                                from celery_tasks import generate_suno_cover_sync
-
                                 # Получаем suno_audio_id по task_id
                                 if cover_task_id:
                                     song_info = execute_query_sync(
-                                        "SELECT audio_url, suno_audio_id, prompt FROM generations WHERE task_id = %s LIMIT 1",
+                                        "SELECT audio_url, suno_audio_id, prompt FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
                                         (cover_task_id, user_id)
                                     )
                                 else:
@@ -2046,11 +2249,27 @@ class VKBot:
                                         (user_id,)
                                     )
 
-                                if song_info and song_info[0][1]:
+                                if song_info and len(song_info) > 0 and song_info[0][1]:
                                     suno_id = song_info[0][1]
                                     original_prompt = song_info[0][2] or ''
 
-                                    cover_url = generate_suno_cover_sync(suno_id, genre)
+                                    # Генерируем кавер через Celery task
+                                    # Получаем task_id оригинальной генерации
+                                    if cover_task_id:
+                                        original_task_id = cover_task_id
+                                    else:
+                                        task_result = execute_query_sync(
+                                            "SELECT task_id FROM generations WHERE user_id = %s AND suno_audio_id = %s ORDER BY id DESC LIMIT 1",
+                                            (user_id, suno_id)
+                                        )
+                                        original_task_id = task_result[0][0] if task_result else None
+                                    
+                                    if original_task_id:
+                                        # Запускаем Celery task асинхронно
+                                        task_result = generate_cover_task.apply_async(args=(user_id, original_task_id, genre, 0, None))
+                                        cover_url = task_result.get(timeout=300) if task_result else None
+                                    else:
+                                        cover_url = None
 
                                     if cover_url:
                                         # Сохраняем результат в базу данных
@@ -2114,7 +2333,7 @@ class VKBot:
                     if task_id_from_payload:
                         song_info = execute_query_sync(
                             "SELECT audio_url, prompt FROM generations WHERE task_id = %s AND user_id = %s LIMIT 1",
-                            (task_id_from_payload,)
+                            (task_id_from_payload, user_id)
                         )
                     else:
                         song_info = execute_query_sync(
@@ -2168,19 +2387,10 @@ class VKBot:
                     event_id=event.obj.get('event_id'),
                     user_id=user_id,
                     peer_id=event.obj.get('peer_id'),
-                    event_data=json.dumps({"type": "show_snackbar", "text": "Команда получена"})
+                    event_data=json.dumps({"type": "show_snackbar", "text": "✅ Команда обрабатывается"})
                 )
             except Exception as callback_error:
                 logger.error(f"❌ Ошибка при отправке ответа на callback: {callback_error}")
-                # Пытаемся отправить обычное сообщение вместо callback-ответа
-                try:
-                    self.send_message(
-                        user_id=user_id,
-                        message="✅ Команда получена и обрабатывается",
-                        keyboard=self.get_main_keyboard(user_id)
-                    )
-                except Exception as msg_error:
-                    logger.error(f"❌ Не удалось отправить альтернативное сообщение: {msg_error}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка при обработке события от кнопки: {e}")
