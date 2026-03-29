@@ -22,24 +22,83 @@ logger = logging.getLogger(__name__)
 
 # Функция для отправки результатов в ВК
 def send_vk_result(user_id, message, audio_url=None):
-    """Отправляет результат генерации пользователю ВК"""
+    """Отправляет результат генерации пользователю ВК с аудио файлом"""
     try:
         import vk_api
         from vk_config import VK_TOKEN
         from vk_api.utils import get_random_id
+        from vk_api.upload import VkUpload
+        import requests
+        import tempfile
+        import os
+        import json
         
         vk_session = vk_api.VkApi(token=VK_TOKEN)
         vk = vk_session.get_api()
+        upload = VkUpload(vk_session)
         
-        params = {
-            'user_id': user_id,
-            'message': message,
-            'random_id': get_random_id()
-        }
-        
-        vk.messages.send(**params)
-        logger.info(f"✅ Результат отправлен пользователю ВК {user_id}")
-        return True
+        # Если есть audio_url, загружаем и отправляем аудио
+        if audio_url:
+            try:
+                # Парсим URL (может быть JSON массив)
+                if isinstance(audio_url, str) and audio_url.startswith('['):
+                    urls = json.loads(audio_url)
+                    # Берем первый URL из массива
+                    audio_url = urls[0] if urls else audio_url
+                
+                logger.info(f"🎵 Скачиваю аудио для отправки в ВК: {audio_url}")
+                
+                # Скачиваем аудио файл
+                response = requests.get(audio_url, timeout=60)
+                response.raise_for_status()
+                
+                # Сохраняем во временный файл
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
+                    tmp_file.write(response.content)
+                    tmp_path = tmp_file.name
+                
+                logger.info(f"📥 Файл скачан: {tmp_path}")
+                
+                # Загружаем аудио в ВК
+                audio = upload.audio(tmp_path, artist="ALBI Music", title="AI Generated Track")
+                attachment = f"audio{audio['owner_id']}_{audio['id']}"
+                
+                logger.info(f"✅ Аудио загружено в ВК: {attachment}")
+                
+                # Отправляем сообщение с аудио
+                vk.messages.send(
+                    user_id=user_id,
+                    message=message,
+                    attachment=attachment,
+                    random_id=get_random_id()
+                )
+                
+                # Удаляем временный файл
+                os.unlink(tmp_path)
+                logger.info(f"✅ Результат с аудио отправлен пользователю ВК {user_id}")
+                return True
+                
+            except Exception as audio_error:
+                logger.error(f"❌ Ошибка отправки аудио в ВК: {audio_error}")
+                # Если не удалось отправить аудио, отправляем хотя бы текст с URL
+                message_with_url = f"{message}\n\n🔗 Слушать: {audio_url}"
+                vk.messages.send(
+                    user_id=user_id,
+                    message=message_with_url,
+                    random_id=get_random_id()
+                )
+                logger.info(f"✅ Текст с URL отправлен пользователю ВК {user_id}")
+                return True
+        else:
+            # Если нет аудио, просто отправляем текст
+            vk.messages.send(
+                user_id=user_id,
+                message=message,
+                random_id=get_random_id()
+            )
+            logger.info(f"✅ Текстовое сообщение отправлено пользователю ВК {user_id}")
+            return True
+            
     except Exception as e:
         logger.error(f"❌ Ошибка отправки результата в ВК для пользователя {user_id}: {e}")
         return False
@@ -1175,6 +1234,17 @@ def generate_karaoke_task(self, user_id, original_task_id, version=0, task_id=No
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
 
     finally:
+        # Возврат токена при ошибке
+        if result_status == 'error':
+            try:
+                execute_query_sync(
+                    "UPDATE users SET balance = balance + 1 WHERE user_id = %s",
+                    (user_id,)
+                )
+                logger.info(f"💰 Возврат 1 токена на баланс user {user_id} из-за ошибки минусовки")
+            except Exception as refund_error:
+                logger.error(f"❌ Не удалось вернуть токен user {user_id}: {refund_error}")
+        
         try:
             save_generation_task_sync(
                 user_id=user_id,
@@ -1289,6 +1359,17 @@ def generate_cover_task(self, user_id, original_task_id, new_style, version=0, t
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
 
     finally:
+        # Возврат токена при ошибке
+        if result_status == 'error':
+            try:
+                execute_query_sync(
+                    "UPDATE users SET balance = balance + 1 WHERE user_id = %s",
+                    (user_id,)
+                )
+                logger.info(f"💰 Возврат 1 токена на баланс user {user_id} из-за ошибки кавера")
+            except Exception as refund_error:
+                logger.error(f"❌ Не удалось вернуть токен user {user_id}: {refund_error}")
+        
         try:
             save_generation_task_sync(
                 user_id=user_id,
@@ -1520,6 +1601,17 @@ def generate_wav_task(self, user_id, original_task_id, version=0, task_id=None):
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
 
     finally:
+        # Возврат 2 токенов при ошибке
+        if result_status == 'error':
+            try:
+                execute_query_sync(
+                    "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
+                    (user_id,)
+                )
+                logger.info(f"💰 Возврат 2 токенов на баланс user {user_id} из-за ошибки WAV")
+            except Exception as refund_error:
+                logger.error(f"❌ Не удалось вернуть токены user {user_id}: {refund_error}")
+        
         try:
             save_generation_task_sync(
                 user_id=user_id,

@@ -16,3 +16,7 @@ ADMIN_IDS = [ADMIN_VK_ID, CO_ADMIN_ID]  # Список ID администрат
 
 # Debug mode
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+
+# YooKassa Configuration (для платежей)
+YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID', "1208840")
+YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY', 'live_706Kz88KIYBby24ajXDegpCmJfyfL-yLoj_Gu_6cimY')

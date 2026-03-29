@@ -271,11 +271,39 @@ def get_song_options_keyboard(task_id):
 
     return keyboard
 
-
-def get_cover_genre_keyboard(task_id):
-    """Клавиатура выбора жанра для кавера (callback-кнопки с payload)"""
+def get_version_selection_keyboard(task_id, action_type):
+    """
+    Клавиатура выбора версии для минусовки, кавера или WAV
+    Args:
+        task_id: ID задачи
+        action_type: Тип действия ('karaoke', 'cover', 'wav')
+    """
     import json
     keyboard = VkKeyboard(inline=True)
+    
+    keyboard.add_callback_button(
+        '🎵 Версия 1',
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": f"{action_type}_v1", "task_id": str(task_id)})
+    )
+    keyboard.add_callback_button(
+        '🎵 Версия 2',
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": f"{action_type}_v2", "task_id": str(task_id)})
+    )
+    
+    return keyboard
+
+
+def get_cover_genre_keyboard(task_id, version=0):
+    """
+    Клавиатура выбора жанра для кавера (callback-кнопки с payload)
+    Args:
+        task_id: ID задачи
+        version: Версия трека (0 или 1)
+    """
+    import json
+    keyboard = VkKeyboard(inline=False, one_time=True)  # Обычная клавиатура, не inline
 
     genres = [
         ("🎤 Поп", "Поп"),
@@ -303,14 +331,14 @@ def get_cover_genre_keyboard(task_id):
         keyboard.add_callback_button(
             label1,
             color=VkKeyboardColor.PRIMARY,
-            payload=json.dumps({"action": "cover_genre", "task_id": str(task_id), "genre": genre1})
+            payload=json.dumps({"action": "cover_genre", "task_id": str(task_id), "genre": genre1, "version": version})
         )
         if i + 1 < len(genres):
             label2, genre2 = genres[i + 1]
             keyboard.add_callback_button(
                 label2,
                 color=VkKeyboardColor.PRIMARY,
-                payload=json.dumps({"action": "cover_genre", "task_id": str(task_id), "genre": genre2})
+                payload=json.dumps({"action": "cover_genre", "task_id": str(task_id), "genre": genre2, "version": version})
             )
 
     return keyboard

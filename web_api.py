@@ -45,7 +45,10 @@ try:
     from celery_tasks import (
         generate_suno_music_sync,
         generate_suno_song_sync,
-        generate_suno_lyrics_sync
+        generate_suno_lyrics_sync,
+        generate_karaoke_task,
+        generate_cover_task,
+        generate_wav_task
     )
     # Алиасы для обратной совместимости
     generate_music_task = generate_suno_music_sync
@@ -57,6 +60,9 @@ except ImportError as e:
     generate_music_task = None
     generate_song_task = None
     generate_suno_lyrics_sync = None
+    generate_karaoke_task = None
+    generate_cover_task = None
+    generate_wav_task = None
 
 # Импорт YooKassa (установить: pip install yookassa)
 try:
@@ -866,6 +872,189 @@ async def unlock_track(task_id: str, user_id: int = Depends(get_current_user)):
         raise
     except Exception as e:
         logger.error(f"❌ Error unlocking track: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ========================
+# Additional Audio Processing Endpoints
+# (Минусовка, Кавер, WAV конвертация)
+# ========================
+
+class GenerateKaraokeRequest(BaseModel):
+    task_id: str
+    version: int = 0
+
+class GenerateCoverRequest(BaseModel):
+    task_id: str
+    genre: str
+    version: int = 0
+
+class GenerateWAVRequest(BaseModel):
+    task_id: str
+    version: int = 0
+
+
+@app.post("/api/karaoke/create")
+async def create_karaoke(request: GenerateKaraokeRequest, user_id: int = Depends(get_current_user)):
+    """Создать минусовку (инструментальную версию) из существующего трека. Стоимость: 1 токен"""
+    if not CELERY_AVAILABLE or not generate_karaoke_task:
+        raise HTTPException(status_code=503, detail="Karaoke service temporarily unavailable")
+    
+    try:
+        track_check = execute_query_sync(
+            "SELECT suno_task_id, suno_audio_id, prompt, status FROM generations WHERE task_id = %s AND user_id = %s",
+            (request.task_id, user_id)
+        )
+        
+        if not track_check:
+            raise HTTPException(status_code=404, detail="Original track not found")
+        
+        suno_task_id, suno_audio_id, prompt, status = track_check[0]
+        
+        if status != "completed":
+            raise HTTPException(status_code=400, detail="Original track is not ready yet")
+        
+        if not suno_task_id or not suno_audio_id:
+            raise HTTPException(status_code=400, detail="This track was created before the system update. Please create a new track.")
+        
+        deduct_result = execute_query_sync("SELECT deduct_tokens_atomic(%s, %s, %s)", (user_id, 1, 'create_karaoke'))
+        
+        if not deduct_result or not deduct_result[0][0]:
+            raise HTTPException(status_code=402, detail="Insufficient balance")
+        
+        new_task_id = str(uuid.uuid4())
+        celery_task = generate_karaoke_task.apply_async(
+            args=[user_id, request.task_id, request.version, new_task_id],
+            queue='generation'
+        )
+        
+        logger.info(f"🎤 Karaoke task created: user={user_id}, original={request.task_id}, new={new_task_id}")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Karaoke generation started",
+            "task_id": new_task_id,
+            "celery_task_id": celery_task.id,
+            "estimated_time": "3-5 minutes"
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error creating karaoke: {e}")
+        try:
+            execute_query_sync("UPDATE users SET balance = balance + 1 WHERE user_id = %s", (user_id,))
+        except:
+            pass
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/cover/create")
+async def create_cover(request: GenerateCoverRequest, user_id: int = Depends(get_current_user)):
+    """Создать кавер (та же песня в другом жанре/стиле). Стоимость: 1 токен"""
+    if not CELERY_AVAILABLE or not generate_cover_task:
+        raise HTTPException(status_code=503, detail="Cover service temporarily unavailable")
+    
+    try:
+        track_check = execute_query_sync(
+            "SELECT suno_task_id, suno_audio_id, prompt, status FROM generations WHERE task_id = %s AND user_id = %s",
+            (request.task_id, user_id)
+        )
+        
+        if not track_check:
+            raise HTTPException(status_code=404, detail="Original track not found")
+        
+        suno_task_id, suno_audio_id, prompt, status = track_check[0]
+        
+        if status != "completed":
+            raise HTTPException(status_code=400, detail="Original track is not ready yet")
+        
+        deduct_result = execute_query_sync("SELECT deduct_tokens_atomic(%s, %s, %s)", (user_id, 1, 'create_cover'))
+        
+        if not deduct_result or not deduct_result[0][0]:
+            raise HTTPException(status_code=402, detail="Insufficient balance")
+        
+        new_task_id = str(uuid.uuid4())
+        celery_task = generate_cover_task.apply_async(
+            args=[user_id, request.task_id, request.genre, request.version, new_task_id],
+            queue='generation'
+        )
+        
+        logger.info(f"🎸 Cover task created: user={user_id}, genre={request.genre}, new={new_task_id}")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Cover generation started",
+            "task_id": new_task_id,
+            "celery_task_id": celery_task.id,
+            "genre": request.genre,
+            "estimated_time": "2-3 minutes"
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error creating cover: {e}")
+        try:
+            execute_query_sync("UPDATE users SET balance = balance + 1 WHERE user_id = %s", (user_id,))
+        except:
+            pass
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/wav/convert")
+async def convert_to_wav(request: GenerateWAVRequest, user_id: int = Depends(get_current_user)):
+    """Конвертировать трек в WAV формат (высокое качество). Стоимость: 2 токена"""
+    if not CELERY_AVAILABLE or not generate_wav_task:
+        raise HTTPException(status_code=503, detail="WAV conversion service temporarily unavailable")
+    
+    try:
+        track_check = execute_query_sync(
+            "SELECT suno_task_id, suno_audio_id, prompt, status FROM generations WHERE task_id = %s AND user_id = %s",
+            (request.task_id, user_id)
+        )
+        
+        if not track_check:
+            raise HTTPException(status_code=404, detail="Original track not found")
+        
+        suno_task_id, suno_audio_id, prompt, status = track_check[0]
+        
+        if status != "completed":
+            raise HTTPException(status_code=400, detail="Original track is not ready yet")
+        
+        if not suno_task_id or not suno_audio_id:
+            raise HTTPException(status_code=400, detail="This track was created before the system update. Please create a new track.")
+        
+        deduct_result = execute_query_sync("SELECT deduct_tokens_atomic(%s, %s, %s)", (user_id, 2, 'convert_wav'))
+        
+        if not deduct_result or not deduct_result[0][0]:
+            raise HTTPException(status_code=402, detail="Insufficient balance (need 2 tokens)")
+        
+        new_task_id = str(uuid.uuid4())
+        celery_task = generate_wav_task.apply_async(
+            args=[user_id, request.task_id, request.version, new_task_id],
+            queue='generation'
+        )
+        
+        logger.info(f"🎵 WAV conversion task created: user={user_id}, original={request.task_id}, new={new_task_id}")
+        
+        return JSONResponse({
+            "success": True,
+            "message": "WAV conversion started",
+            "task_id": new_task_id,
+            "celery_task_id": celery_task.id,
+            "estimated_time": "2-3 minutes",
+            "tokens_spent": 2
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error converting to WAV: {e}")
+        try:
+            execute_query_sync("UPDATE users SET balance = balance + 2 WHERE user_id = %s", (user_id,))
+        except:
+            pass
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
