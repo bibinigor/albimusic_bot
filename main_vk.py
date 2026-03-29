@@ -1244,8 +1244,8 @@ class VKBot:
                 
                 # Запускаем генерацию песни
                 try:
-                    # Переводим жанр на английский для Suno API
-                    translated_genre = translate_style_to_english(genre, add_improvements=False)
+                    # Переводим жанр на английский для Suno API (с improvements для лучшего результата)
+                    translated_genre = translate_style_to_english(genre, add_improvements=True)
                     logger.info(f"🔄 Перевод жанра для песни: '{genre}' → '{translated_genre}'")
                     
                     # Формируем стиль с учетом пола вокалиста
