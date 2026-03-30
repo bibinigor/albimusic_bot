@@ -20,88 +20,72 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Функция для отправки результатов в ВК
-def send_vk_result(user_id, message, audio_url=None):
-    """Отправляет результат генерации пользователю ВК с аудио файлом"""
-    try:
-        import vk_api
-        from vk_config import VK_TOKEN
-        from vk_api.utils import get_random_id
-        from vk_api.upload import VkUpload
-        import requests
-        import tempfile
-        import os
-        import json
-        
-        vk_session = vk_api.VkApi(token=VK_TOKEN)
-        vk = vk_session.get_api()
-        upload = VkUpload(vk_session)
-        
-        # Если есть audio_url, загружаем и отправляем аудио
-        if audio_url:
-            try:
-                # Парсим URL (может быть JSON массив)
-                if isinstance(audio_url, str) and audio_url.startswith('['):
-                    urls = json.loads(audio_url)
-                    # Берем первый URL из массива
-                    audio_url = urls[0] if urls else audio_url
-                
-                logger.info(f"🎵 Скачиваю аудио для отправки в ВК: {audio_url}")
-                
-                # Скачиваем аудио файл
-                response = requests.get(audio_url, timeout=60)
-                response.raise_for_status()
-                
-                # Сохраняем во временный файл
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
-                    tmp_file.write(response.content)
-                    tmp_path = tmp_file.name
-                
-                logger.info(f"📥 Файл скачан: {tmp_path}")
-                
-                # Загружаем аудио в ВК
-                audio = upload.audio(tmp_path, artist="ALBI Music", title="AI Generated Track")
-                attachment = f"audio{audio['owner_id']}_{audio['id']}"
-                
-                logger.info(f"✅ Аудио загружено в ВК: {attachment}")
-                
-                # Отправляем сообщение с аудио
-                vk.messages.send(
-                    user_id=user_id,
-                    message=message,
-                    attachment=attachment,
-                    random_id=get_random_id()
-                )
-                
-                # Удаляем временный файл
-                os.unlink(tmp_path)
-                logger.info(f"✅ Результат с аудио отправлен пользователю ВК {user_id}")
-                return True
-                
-            except Exception as audio_error:
-                logger.error(f"❌ Ошибка отправки аудио в ВК: {audio_error}")
-                # Если не удалось отправить аудио, отправляем хотя бы текст с URL
-                message_with_url = f"{message}\n\n🔗 Слушать: {audio_url}"
-                vk.messages.send(
-                    user_id=user_id,
-                    message=message_with_url,
-                    random_id=get_random_id()
-                )
-                logger.info(f"✅ Текст с URL отправлен пользователю ВК {user_id}")
-                return True
-        else:
-            # Если нет аудио, просто отправляем текст
+# Функция для отправки результатов в ВК с RETRY механизмом
+def send_vk_result(user_id, message, audio_url=None, max_retries=3):
+    """
+    Отправляет результат генерации пользователю ВК.
+    ПРИМЕЧАНИЕ: upload.audio для групп отключён VK API — отправляем ссылку текстом.
+    
+    Args:
+        user_id: ID пользователя ВК
+        message: Текст сообщения
+        audio_url: URL аудио файла (опционально, добавляется в текст ссылкой)
+        max_retries: Максимальное количество попыток (по умолчанию 3)
+    
+    Returns:
+        bool: True если отправка успешна, False если ошибка
+    """
+    import vk_api
+    import json as json_module
+    from vk_config import VK_TOKEN
+    from vk_api.utils import get_random_id
+
+    logger.info(f"📤 send_vk_result вызван: user_id={user_id}, audio_url={'есть' if audio_url else 'нет'}")
+
+    # Парсим URL если это JSON массив
+    final_url = None
+    if audio_url:
+        try:
+            if isinstance(audio_url, str) and audio_url.strip().startswith('['):
+                urls = json_module.loads(audio_url)
+                final_url = urls[0] if isinstance(urls, list) and urls else audio_url
+            else:
+                final_url = audio_url
+        except Exception:
+            final_url = audio_url
+        logger.info(f"🔗 URL для отправки: {final_url}")
+
+    # Формируем финальное сообщение
+    if final_url:
+        full_message = f"{message}\n\n🔗 Слушать / скачать: {final_url}"
+    else:
+        full_message = message
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"📤 Попытка {attempt}/{max_retries} отправки сообщения в ВК для user {user_id}")
+
+            vk_session = vk_api.VkApi(token=VK_TOKEN)
+            vk = vk_session.get_api()
+
+            # Отправляем text-сообщение со ссылкой (upload.audio отключён VK для групп)
             vk.messages.send(
                 user_id=user_id,
-                message=message,
+                message=full_message,
                 random_id=get_random_id()
             )
-            logger.info(f"✅ Текстовое сообщение отправлено пользователю ВК {user_id}")
+            logger.info(f"✅ Сообщение успешно отправлено пользователю ВК {user_id} (попытка {attempt})")
             return True
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки результата в ВК для пользователя {user_id}: {e}")
-        return False
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки в ВК (попытка {attempt}/{max_retries}) для user {user_id}: {e}")
+            import traceback
+            logger.error(f"📋 Traceback: {traceback.format_exc()}")
+            if attempt < max_retries:
+                time.sleep(3 * attempt)
+
+    logger.error(f"🚫 Все {max_retries} попытки отправки исчерпаны для user {user_id}")
+    return False
 
 # Словарь перевода русских музыкальных терминов для Suno API
 MUSIC_STYLE_TRANSLATIONS = {
