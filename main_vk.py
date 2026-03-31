@@ -1208,7 +1208,11 @@ class VKBot:
                     # Отправляем сообщение с просьбой ввести свой жанр
                     self.send_message(
                         user_id=user_id,
-                        message="Опишите жанр и стиль песни своими словами:",
+                        message=(
+                            "Опишите жанр и стиль песни своими словами:\n\n"
+                            "⚠️ Максимальная длина описания — 230 символов.\n"
+                            "Пример: «Энергичный поп-рок, яркие гитары, женский вокал»"
+                        ),
                         keyboard=self.get_cancel_keyboard()
                     )
                     
@@ -1242,6 +1246,23 @@ class VKBot:
                     
             # Обработка ввода своего жанра
             elif vk_state == States.WAITING_CUSTOM_GENRE:
+                # Проверяем длину описания жанра
+                MAX_GENRE_LENGTH = 230
+                if len(text) > MAX_GENRE_LENGTH:
+                    self.send_message(
+                        user_id=user_id,
+                        message=(
+                            f"✂️ Описание жанра слишком длинное ({len(text)} символов).\n\n"
+                            f"Пожалуйста, сократите до {MAX_GENRE_LENGTH} символов.\n"
+                            f"Сейчас лишних: {len(text) - MAX_GENRE_LENGTH} символов.\n\n"
+                            "Пример: «Энергичный поп-рок, яркие гитары, женский вокал»"
+                        ),
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"⚠️ Пользователь {user_id} ввел слишком длинный жанр: {len(text)} символов")
+                    command_handled = True
+                    return
+                
                 # Сохраняем введенный пользователем жанр
                 asyncio.get_event_loop().run_until_complete(
                     self.state_manager.update_data(user_id, genre=text)
@@ -1445,12 +1466,8 @@ class VKBot:
                                     )
                                     new_balance = bal_result[0][0] if bal_result and bal_result[0] else 0
                                     if new_balance <= 0:
-                                        referral_link = f"https://vk.com/app51775721?ref={user_id}"
-                                        from vk_keyboards import get_buy_keyboard
-                                        try:
-                                            buy_kb = get_buy_keyboard()
-                                        except Exception:
-                                            buy_kb = self.get_main_keyboard(user_id)
+                                        from vk_keyboards import get_balance_actions_keyboard
+                                        buy_kb = get_balance_actions_keyboard()
                                         self.send_message(
                                             user_id=user_id,
                                             message=(
@@ -1460,7 +1477,7 @@ class VKBot:
                                                 "🤝 Пригласите друга — получите 2 токена бесплатно!\n\n"
                                                 f"🔗 Ваша реферальная ссылка:\nhttps://vk.me/albi_music?ref={user_id}"
                                             ),
-                                            keyboard=self.get_main_keyboard(user_id)
+                                            keyboard=buy_kb
                                         )
                                 except Exception as bal_err:
                                     logger.warning(f"⚠️ Ошибка проверки баланса после генерации: {bal_err}")
@@ -1508,7 +1525,11 @@ class VKBot:
                     )
                     self.send_message(
                         user_id=user_id,
-                        message="✏️ Опишите стиль и жанр музыки своими словами:\n\nНапример: «медленный джаз с саксофоном» или «агрессивный дабстеп»",
+                        message=(
+                            "✏️ Опишите стиль и жанр музыки своими словами:\n\n"
+                            "⚠️ Максимальная длина описания — 230 символов.\n"
+                            "Пример: «медленный джаз с саксофоном» или «агрессивный дабстеп»"
+                        ),
                         keyboard=self.get_cancel_keyboard()
                     )
                     logger.info(f"✅ Пользователь {user_id} выбрал ввод своего стиля для инструментала")
@@ -1664,6 +1685,23 @@ class VKBot:
 
             # Обработка ввода своего стиля для инструментальной музыки (после выбора "Свой вариант")
             elif vk_state == States.WAITING_CUSTOM_STYLE:
+                # Проверяем длину описания стиля
+                MAX_GENRE_LENGTH = 230
+                if len(text) > MAX_GENRE_LENGTH:
+                    self.send_message(
+                        user_id=user_id,
+                        message=(
+                            f"✂️ Описание стиля слишком длинное ({len(text)} символов).\n\n"
+                            f"Пожалуйста, сократите до {MAX_GENRE_LENGTH} символов.\n"
+                            f"Сейчас лишних: {len(text) - MAX_GENRE_LENGTH} символов.\n\n"
+                            "Пример: «медленный джаз с саксофоном» или «агрессивный дабстеп»"
+                        ),
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"⚠️ Пользователь {user_id} ввел слишком длинный стиль: {len(text)} символов")
+                    command_handled = True
+                    return
+
                 genre = text  # Пользователь ввёл свой стиль
 
                 # Переводим жанр на английский для Suno API
