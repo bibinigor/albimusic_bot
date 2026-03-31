@@ -2327,10 +2327,18 @@ async def process_repeat_track(callback_query: types.CallbackQuery):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
+            referral_link = f"https://t.me/AlBimusic_bot?start=ref_{user_id}"
             await bot.send_message(
                 user_id,
-                "❌ Недостаточно токенов на балансе.\n\nНажмите кнопку 💰 Баланс чтобы пополнить.",
-                reply_markup=get_main_menu_keyboard(user_id)
+                (
+                    "❌ *Недостаточно токенов!*\n\n"
+                    "Чтобы создать ещё песни:\n"
+                    "💰 *Купить токены* — нажми кнопку Баланс\n"
+                    "🤝 *Пригласи друга* — получи **2 токена** бесплатно!\n\n"
+                    f"🔗 Твоя реферальная ссылка:\n`{referral_link}`"
+                ),
+                reply_markup=get_main_menu_keyboard(user_id),
+                parse_mode="Markdown"
             )
             return
         # Списываем генерацию

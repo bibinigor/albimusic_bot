@@ -709,11 +709,22 @@ async def get_generation_status(task_id: str, user_id: int = Depends(get_current
             # audio_url хранится как JSON массив для демо-системы
             try:
                 urls = json.loads(audio_url) if isinstance(audio_url, str) else audio_url
+                if isinstance(urls, str):
+                    urls = [urls]
                 response_data["audio_urls"] = urls
-                response_data["is_demo"] = True  # Всегда демо 45 сек
-            except:
-                response_data["audio_urls"] = [audio_url]
+                # Первая генерация — полная версия в подарок
+                count_result = execute_query_sync(
+                    "SELECT COUNT(*) FROM generations WHERE user_id = %s AND status = 'completed'",
+                    (user_id,)
+                )
+                completed_count = count_result[0][0] if count_result and count_result[0] else 0
+                is_first_generation = (completed_count == 1)
+                response_data["is_demo"] = not is_first_generation
+                response_data["is_first_generation"] = is_first_generation
+            except Exception:
+                response_data["audio_urls"] = [audio_url] if audio_url else []
                 response_data["is_demo"] = True
+                response_data["is_first_generation"] = False
         elif status_value == "failed":
             response_data["error"] = error_message
 

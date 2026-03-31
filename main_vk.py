@@ -1296,10 +1296,10 @@ class VKBot:
                                 import uuid
                                 db_task_id = str(uuid.uuid4())
                                 
-                                # Сохраняем результат в базу данных
+                                # Сохраняем результат в базу данных с status='completed'
                                 execute_query_sync(
-                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                                    (user_id, db_task_id, style, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id)
+                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                                    (user_id, db_task_id, style, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id, 'completed')
                                 )
                                 
                                 # Импортируем клавиатуру с опциями
@@ -1357,6 +1357,42 @@ class VKBot:
                                     (user_id,)
                                 )
                                 logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
+                                
+                                # Помечаем в БД как уже доставленное (чтобы Telegram-монитор не отправил дубль)
+                                try:
+                                    execute_query_sync(
+                                        "UPDATE generations SET audio_url = %s WHERE task_id = %s",
+                                        (f"ALREADY_SENT_{audio_url}", db_task_id)
+                                    )
+                                except Exception as mark_err:
+                                    logger.warning(f"⚠️ Не удалось пометить генерацию как отправленную: {mark_err}")
+                                
+                                # Проверяем баланс после списания — если 0, предлагаем купить или пригласить
+                                try:
+                                    bal_result = execute_query_sync(
+                                        "SELECT balance FROM users WHERE user_id = %s", (user_id,)
+                                    )
+                                    new_balance = bal_result[0][0] if bal_result and bal_result[0] else 0
+                                    if new_balance <= 0:
+                                        referral_link = f"https://vk.com/app51775721?ref={user_id}"
+                                        from vk_keyboards import get_buy_keyboard
+                                        try:
+                                            buy_kb = get_buy_keyboard()
+                                        except Exception:
+                                            buy_kb = self.get_main_keyboard(user_id)
+                                        self.send_message(
+                                            user_id=user_id,
+                                            message=(
+                                                "🔔 Ваш токен использован!\n\n"
+                                                "Чтобы создать ещё песни:\n"
+                                                "💰 Купите токены — нажмите кнопку «Баланс»\n"
+                                                "🤝 Пригласите друга — получите 2 токена бесплатно!\n\n"
+                                                f"🔗 Ваша реферальная ссылка:\nhttps://vk.me/albi_music?ref={user_id}"
+                                            ),
+                                            keyboard=self.get_main_keyboard(user_id)
+                                        )
+                                except Exception as bal_err:
+                                    logger.warning(f"⚠️ Ошибка проверки баланса после генерации: {bal_err}")
                             else:
                                 # Если не удалось сгенерировать песню
                                 self.send_message(
@@ -1464,11 +1500,11 @@ class VKBot:
                             import uuid
                             db_task_id = str(uuid.uuid4())
                             
-                            # Сохраняем в БД
+                            # Сохраняем в БД со status='completed'
                             try:
                                 execute_query_sync(
-                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                                    (_uid, db_task_id, _genre, audio_url, False, False, suno_task_id, suno_audio_id)
+                                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                                    (_uid, db_task_id, _genre, audio_url, False, False, suno_task_id, suno_audio_id, 'completed')
                                 )
                             except Exception as db_err:
                                 logger.error(f"❌ Ошибка сохранения музыки в БД: {db_err}")
@@ -1684,11 +1720,11 @@ class VKBot:
                     import uuid
                     db_task_id = str(uuid.uuid4())
                     
-                    # Сохраняем результат в базу данных
+                    # Сохраняем результат в базу данных со status='completed'
                     try:
                         execute_query_sync(
-                            'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                            (user_id, db_task_id, genre, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id)
+                            'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                            (user_id, db_task_id, genre, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id, 'completed')
                         )
                         logger.info(f"✅ Результат генерации песни сохранен в базе данных для пользователя {user_id}")
                     except Exception as e:
@@ -2176,6 +2212,13 @@ class VKBot:
                         (user_id,)
                     )
                     if result and result[0][0] >= 1:  # Кавер стоит 1 токен
+                        # ✅ КРИТИЧНО: Списываем баланс СРАЗУ при выборе версии
+                        execute_query_sync(
+                            "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id} при выборе версии {version+1} для кавера")
+                        
                         # Показываем выбор жанра с версией в payload
                         from vk_keyboards import get_cover_genre_keyboard
                         self.send_message(
@@ -2206,17 +2249,14 @@ class VKBot:
                 logger.info(f"🎸 Запуск кавера: user {user_id}, жанр '{genre}', версия {version+1}, task_id={cover_task_id}")
 
                 try:
+                    # ✅ ИСПРАВЛЕНО: Баланс уже списан в cover_v1/v2, здесь только проверяем что задача не дублируется
+                    # Проверяем что у пользователя достаточно баланса (на случай если он нажал кнопку повторно)
                     result = execute_query_sync(
                         "SELECT balance FROM users WHERE user_id = %s",
                         (user_id,)
                     )
-                    if result and result[0][0] >= 1:  # Кавер стоит 1 токен
-                        # Списываем баланс СРАЗУ
-                        execute_query_sync(
-                            "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
-                            (user_id,)
-                        )
-                        logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id} ДО генерации кавера")
+                    # Разрешаем запуск даже с балансом 0, т.к. баланс УЖЕ списан при выборе версии
+                    if result:  # Просто проверяем что пользователь существует
                         
                         # Отправляем сообщение о начале генерации
                         version_name = "Версия 1" if version == 0 else "Версия 2"

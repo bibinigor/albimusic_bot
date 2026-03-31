@@ -294,6 +294,75 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
             await bot.close()
             return True
 
+        # Проверяем: первая ли это генерация пользователя
+        # (если да — отправляем ПОЛНУЮ версию в подарок, токен уже списан)
+        first_gen_check = execute_query_sync(
+            "SELECT COUNT(*) FROM generations WHERE user_id = %s AND status = 'completed'",
+            (user_id,)
+        )
+        completed_count = first_gen_check[0][0] if first_gen_check and first_gen_check[0] else 0
+        is_first_generation = (completed_count == 1)
+
+        if is_first_generation:
+            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ПОЛНУЮ версию бесплатно")
+            header = "🎤 Ваша первая песня готова!" if is_song else "🎵 Ваша первая музыка готова!"
+            header += "\n\n🎁 Первая генерация — подарок от ALBI Music!"
+            await bot.send_message(chat_id=user_id, text=header, parse_mode="Markdown")
+
+            for idx, url in enumerate(audio_urls[:2], 1):
+                try:
+                    await bot.send_audio(
+                        chat_id=user_id,
+                        audio=url,
+                        caption=f"🎼 Полная версия {idx}",
+                        title=f"AI Music Full v{idx}",
+                        performer="ALBI Music"
+                    )
+                    logger.info(f"✅ Полная версия {idx}/2 отправлена user {user_id} (первая генерация)")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки полной версии {idx}: {e}")
+
+            # Сохраняем как разблокированное
+            try:
+                execute_query_sync(
+                    """INSERT INTO demo_tracks (task_id, user_id, full_url_1, full_url_2, is_unlocked)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (task_id) DO UPDATE SET is_unlocked = true""",
+                    (task_id, user_id, audio_urls[0], audio_urls[1] if len(audio_urls) > 1 else audio_urls[0], True)
+                )
+            except Exception as e:
+                logger.error(f"❌ Ошибка сохранения первой генерации: {e}")
+
+            # Отправляем сообщение о токенах и приглашении
+            referral_link = f"https://t.me/AlBimusic_bot?start=ref_{user_id}"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🎤 Минусовка (1 токен)", callback_data=f"karaoke_{task_id}"),
+                    InlineKeyboardButton(text="🎸 Кавер (1 токен)", callback_data=f"cover_{task_id}")
+                ],
+                [
+                    InlineKeyboardButton(text="🎵 В WAV (2 токена)", callback_data=f"wav_{task_id}"),
+                    InlineKeyboardButton(text="📢 Отправить в канал", callback_data=f"post_{task_id}")
+                ],
+                [InlineKeyboardButton(text="💰 Купить токены", callback_data="show_balance")],
+                [InlineKeyboardButton(text="🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")]
+            ])
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🎁 *Первый токен использован!*\n\n"
+                    "Чтобы создать ещё песни:\n"
+                    "💰 *Купить токены* — в меню Баланс\n"
+                    "🤝 *Пригласить друга* — получи **2 токена** бесплатно!\n\n"
+                    f"🔗 Твоя реферальная ссылка:\n`{referral_link}`"
+                ),
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+
+            await bot.close()
+            return True
+
         # Для пользователей с оплатой - отправляем ПОЛНЫЕ версии
         has_paid_result = execute_query_sync(
             "SELECT COUNT(*) FROM payments WHERE user_id = %s AND status = 'succeeded'",
