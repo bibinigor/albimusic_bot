@@ -85,33 +85,42 @@ def get_home_keyboard():
     keyboard.add_button('🏠 В главное меню', color=VkKeyboardColor.SECONDARY)
     return keyboard
 
-def get_music_genres_keyboard():
-    """Клавиатура выбора жанра музыки"""
-    keyboard = VkKeyboard(inline=True)
-    
-    # Основные популярные жанры (сокращенный список)
-    genres = [
-        ("🎤 Поп", VkKeyboardColor.PRIMARY),
-        ("🎸 Рок", VkKeyboardColor.PRIMARY),
-        ("🎺 Джаз", VkKeyboardColor.PRIMARY),
-        ("⚡ Электронная", VkKeyboardColor.PRIMARY),
-        ("🎻 Классика", VkKeyboardColor.PRIMARY),
-        ("✏️ Свой вариант", VkKeyboardColor.POSITIVE)
+def get_all_genres_keyboard():
+    """
+    Полная клавиатура выбора жанра — все 17 жанров как обычная reply-клавиатура.
+    Заменяет главное меню на период выбора жанра (как в Telegram-боте).
+    10 строк × 2 кнопки — укладывается в лимит VK.
+    """
+    keyboard = VkKeyboard(one_time=False)  # Reply keyboard, не inline — заменяет главное меню
+
+    # 8 рядов по 2 жанра
+    genre_rows = [
+        [("🎤 Поп", VkKeyboardColor.PRIMARY), ("🎸 Рок", VkKeyboardColor.PRIMARY)],
+        [("🎺 Джаз", VkKeyboardColor.PRIMARY), ("🎵 Блюз", VkKeyboardColor.PRIMARY)],
+        [("🎧 Хип-хоп", VkKeyboardColor.PRIMARY), ("⚡ Электронная", VkKeyboardColor.PRIMARY)],
+        [("🎻 Классическая", VkKeyboardColor.PRIMARY), ("💿 R&B/Соул", VkKeyboardColor.PRIMARY)],
+        [("🌴 Регги", VkKeyboardColor.PRIMARY), ("🤠 Кантри", VkKeyboardColor.PRIMARY)],
+        [("🤘 Метал", VkKeyboardColor.PRIMARY), ("🪕 Фолк", VkKeyboardColor.PRIMARY)],
+        [("💃 Латины", VkKeyboardColor.PRIMARY), ("🎭 Панк", VkKeyboardColor.PRIMARY)],
+        [("🕺 Фанк", VkKeyboardColor.PRIMARY), ("🎙️ Шансон", VkKeyboardColor.PRIMARY)],
+        # Ряд 9: свой вариант
+        [("✏️ Свой вариант", VkKeyboardColor.POSITIVE)],
+        # Ряд 10: возврат в главное меню
+        [("🏠 В главное меню", VkKeyboardColor.SECONDARY)],
     ]
-    
-    # Добавляем жанры в клавиатуру (максимум 2 кнопки в ряду для ВК)
-    for i in range(0, len(genres), 2):
+
+    for i, row in enumerate(genre_rows):
         if i > 0:
             keyboard.add_line()
-        keyboard.add_button(genres[i][0], color=genres[i][1])
-        if i + 1 < len(genres):
-            keyboard.add_button(genres[i+1][0], color=genres[i+1][1])
-    
-    # Добавляем кнопку возврата в главное меню
-    keyboard.add_line()
-    keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.PRIMARY)
-    
+        for label, color in row:
+            keyboard.add_button(label, color=color)
+
     return keyboard
+
+
+def get_music_genres_keyboard():
+    """Клавиатура выбора жанра музыки (все 17 жанров — как в Telegram)"""
+    return get_all_genres_keyboard()
 
 def get_tokens_keyboard():
     """Клавиатура выбора количества токенов для покупки"""
@@ -155,32 +164,8 @@ def get_lyrics_variants_keyboard():
     return keyboard
 
 def get_song_genres_keyboard():
-    """Клавиатура выбора жанра песни"""
-    keyboard = VkKeyboard(inline=True)
-    
-    # Основные популярные жанры (сокращенный список)
-    genres = [
-        ("🎤 Поп", VkKeyboardColor.PRIMARY),
-        ("🎸 Рок", VkKeyboardColor.PRIMARY),
-        ("🎺 Джаз", VkKeyboardColor.PRIMARY),
-        ("⚡ Электронная", VkKeyboardColor.PRIMARY),
-        ("🎻 Классика", VkKeyboardColor.PRIMARY),
-        ("✏️ Свой вариант", VkKeyboardColor.POSITIVE)
-    ]
-    
-    # Добавляем жанры в клавиатуру (максимум 2 кнопки в ряду для ВК)
-    for i in range(0, len(genres), 2):
-        if i > 0:
-            keyboard.add_line()
-        keyboard.add_button(genres[i][0], color=genres[i][1])
-        if i + 1 < len(genres):
-            keyboard.add_button(genres[i+1][0], color=genres[i+1][1])
-    
-    # Добавляем кнопку возврата в главное меню
-    keyboard.add_line()
-    keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.PRIMARY)
-    
-    return keyboard
+    """Клавиатура выбора жанра песни (все 17 жанров — как в Telegram)"""
+    return get_all_genres_keyboard()
 
 def get_tracks_navigation_keyboard(page, total_pages):
     """Клавиатура навигации по страницам треков"""

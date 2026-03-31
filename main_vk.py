@@ -246,110 +246,161 @@ class VKBot:
     def register_user(self, user_id, username, first_name):
         """Register new user in database"""
         try:
-            execute_query_sync(
-                "INSERT INTO users (user_id, username, first_name) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO NOTHING",
+            result = execute_query_sync(
+                "INSERT INTO users (user_id, username, first_name, balance, created_at) VALUES (%s, %s, %s, 1, NOW()) ON CONFLICT (user_id) DO NOTHING",
                 (user_id, username, first_name)
             )
-            logger.info(f"✅ Пользователь {user_id} успешно зарегистрирован")
+            logger.info(f"✅ Пользователь {user_id} успешно зарегистрирован с 1 токеном")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка регистрации пользователя {user_id}: {e}")
             return False
 
     def get_admin_stats(self):
-        """Получить статистику для админ-панели"""
+        """Получить статистику для админ-панели (аналог Telegram-бота)"""
         try:
-            # Всего пользователей
-            users_count = execute_query_sync(
-                "SELECT COUNT(*) FROM users"
-            )[0][0]
-            
-            # Новые пользователи за 24 часа
-            users_24h = execute_query_sync(
-                "SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '24 hours'"
-            )[0][0]
-            
-            # Новые пользователи за 7 дней
-            users_7d = execute_query_sync(
-                "SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '7 days'"
-            )[0][0]
-            
-            # Количество генераций
-            generations_count = execute_query_sync(
-                "SELECT COUNT(*) FROM generations"
-            )[0][0] if execute_query_sync("SELECT to_regclass('public.generations')") and execute_query_sync("SELECT to_regclass('public.generations')")[0][0] else 0
-            
-            # Генерации за 24 часа
-            generations_24h = execute_query_sync(
-                "SELECT COUNT(*) FROM generations WHERE created_at > NOW() - INTERVAL '24 hours'"
-            )[0][0] if execute_query_sync("SELECT to_regclass('public.generations')") and execute_query_sync("SELECT to_regclass('public.generations')")[0][0] else 0
-            
-            # Генерации за 7 дней
-            generations_7d = execute_query_sync(
-                "SELECT COUNT(*) FROM generations WHERE created_at > NOW() - INTERVAL '7 days'"
-            )[0][0] if execute_query_sync("SELECT to_regclass('public.generations')") and execute_query_sync("SELECT to_regclass('public.generations')")[0][0] else 0
-            
-            # Статистика платежей
+            # 1. Всего пользователей
+            users_result = execute_query_sync("SELECT COUNT(*) as total FROM users")
+            total_users = users_result[0][0] if users_result and users_result[0] else 0
+
+            # 2. Новых сегодня (за текущие сутки)
+            new_today_result = execute_query_sync(
+                "SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE"
+            )
+            new_today = new_today_result[0][0] if new_today_result and new_today_result[0] else 0
+
+            # 3. Новых за 7 дней
+            new_7days_result = execute_query_sync(
+                "SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'"
+            )
+            new_7days = new_7days_result[0][0] if new_7days_result and new_7days_result[0] else 0
+
+            # 4. Новых за 30 дней
+            new_30days_result = execute_query_sync(
+                "SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'"
+            )
+            new_30days = new_30days_result[0][0] if new_30days_result and new_30days_result[0] else 0
+
+            # 5. Воронка: новые за 24ч и дошедшие до меню
+            started_24h_result = execute_query_sync(
+                "SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours'"
+            )
+            started_24h = started_24h_result[0][0] if started_24h_result and started_24h_result[0] else 0
+
+            menu_24h_result = execute_query_sync(
+                "SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours' AND first_menu_action_at IS NOT NULL"
+            )
+            menu_24h = menu_24h_result[0][0] if menu_24h_result and menu_24h_result[0] else 0
+
+            menu_pct = round(menu_24h * 100.0 / started_24h, 1) if started_24h > 0 else 0
+
+            # 6. Генерации за 24 часа
+            generations_24h_result = execute_query_sync(
+                "SELECT COUNT(*) as total FROM generations WHERE created_at >= NOW() - INTERVAL '24 hours'"
+            )
+            generations_24h = generations_24h_result[0][0] if generations_24h_result and generations_24h_result[0] else 0
+
+            # 7. Всего генераций и успешных
+            total_gen_result = execute_query_sync("SELECT COUNT(*) as total FROM generations")
+            total_generations = total_gen_result[0][0] if total_gen_result and total_gen_result[0] else 0
+
+            completed_result = execute_query_sync(
+                "SELECT COUNT(*) as total FROM generations WHERE status = 'completed'"
+            )
+            completed_generations = completed_result[0][0] if completed_result and completed_result[0] else 0
+
+            success_rate = round((completed_generations * 100.0) / total_generations, 1) if total_generations > 0 else 0
+
+            # 8. Приглашённых сегодня
+            invited_today_result = execute_query_sync(
+                "SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE AND invited_by IS NOT NULL"
+            )
+            invited_today = invited_today_result[0][0] if invited_today_result and invited_today_result[0] else 0
+
+            # 9. Статистика платежей
             try:
-                # За 24 часа
-                payments_24h = execute_query_sync(
+                count_24h_result = execute_query_sync(
+                    "SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'"
+                )
+                count_24h = count_24h_result[0][0] if count_24h_result and count_24h_result[0] else 0
+
+                sum_24h_result = execute_query_sync(
+                    "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'"
+                )
+                sum_24h = int(sum_24h_result[0][0]) if sum_24h_result and sum_24h_result[0] else 0
+
+                count_7days_result = execute_query_sync(
+                    "SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'"
+                )
+                count_7days = count_7days_result[0][0] if count_7days_result and count_7days_result[0] else 0
+
+                sum_7days_result = execute_query_sync(
+                    "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'"
+                )
+                sum_7days = int(sum_7days_result[0][0]) if sum_7days_result and sum_7days_result[0] else 0
+
+                count_total_result = execute_query_sync(
+                    "SELECT COUNT(*) FROM payments WHERE status = 'succeeded'"
+                )
+                count_total = count_total_result[0][0] if count_total_result and count_total_result[0] else 0
+
+                sum_total_result = execute_query_sync(
+                    "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded'"
+                )
+                sum_total = int(sum_total_result[0][0]) if sum_total_result and sum_total_result[0] else 0
+
+                # Разбивка по тарифам за 24ч
+                tariffs_rows = execute_query_sync(
                     """
-                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
+                    SELECT amount, COUNT(*)
                     FROM payments
                     WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'
+                    GROUP BY amount
+                    ORDER BY amount
                     """
                 )
-                payments_count_24h = payments_24h[0][0] if payments_24h and payments_24h[0][0] else 0
-                payments_sum_24h = int(payments_24h[0][1]) if payments_24h and payments_24h[0][1] else 0
-                
-                # За 7 дней
-                payments_7d = execute_query_sync(
-                    """
-                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
-                    FROM payments
-                    WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'
-                    """
-                )
-                payments_count_7d = payments_7d[0][0] if payments_7d and payments_7d[0][0] else 0
-                payments_sum_7d = int(payments_7d[0][1]) if payments_7d and payments_7d[0][1] else 0
-                
-                # Всего
-                payments_all = execute_query_sync(
-                    """
-                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
-                    FROM payments
-                    WHERE status = 'succeeded'
-                    """
-                )
-                payments_count_all = payments_all[0][0] if payments_all and payments_all[0][0] else 0
-                payments_sum_all = int(payments_all[0][1]) if payments_all and payments_all[0][1] else 0
+                tariffs_24h = {row[0]: row[1] for row in tariffs_rows} if tariffs_rows else {}
             except Exception as e:
                 logger.error(f"❌ Ошибка получения статистики платежей: {e}")
-                # Если таблица payments не существует
-                payments_count_24h = 0
-                payments_sum_24h = 0
-                payments_count_7d = 0
-                payments_sum_7d = 0
-                payments_count_all = 0
-                payments_sum_all = 0
-            
-            return f"""📊 **Статистика бота**
+                count_24h = sum_24h = count_7days = sum_7days = count_total = sum_total = 0
+                tariffs_24h = {}
 
-👥 Пользователи:
-📆 За 24 часа: {users_24h} новых
-📆 За 7 дней: {users_7d} новых
-📊 Всего: {users_count} пользователей
+            # Формируем строку разбивки по тарифам
+            if tariffs_24h:
+                amount_to_tokens = {50: 1, 250: 10, 500: 25, 1000: 60, 2000: 140}
+                tariff_lines = []
+                for amount, cnt in sorted(tariffs_24h.items()):
+                    tokens = amount_to_tokens.get(amount)
+                    if tokens:
+                        tariff_lines.append(f"• {cnt}×{amount}₽ ({tokens} ток.)")
+                    else:
+                        tariff_lines.append(f"• {cnt}×{amount}₽")
+                tariffs_text = "\n".join(tariff_lines)
+            else:
+                tariffs_text = "• нет оплат за 24ч"
 
-🎵 Генерации:
-📆 За 24 часа: {generations_24h} генераций
-📆 За 7 дней: {generations_7d} генераций
-📊 Всего: {generations_count} генераций
+            return f"""📊 Статистика бота:
 
-💰 Платежи:
-📆 За 24 часа: {payments_count_24h} платежей · {payments_sum_24h}₽
-📆 За 7 дней: {payments_count_7d} платежей · {payments_sum_7d}₽
-📊 Всего: {payments_count_all} платежей · {payments_sum_all}₽"""
-            
+👥 Всего пользователей: {total_users} (+{new_today})
+📈 Новых за 7 дней: {new_7days}
+📅 Новых за 30 дней: {new_30days}
+
+📊 Воронка (НОВЫЕ за 24ч):
+▶️ Нажали /start (новые): {started_24h}
+🖱 Дошли до меню (из новых): {menu_24h} ({menu_pct}%)
+
+🎵 Генераций за 24ч: {generations_24h} шт
+✅ Общий успех (все время): {success_rate}%
+
+💳 Оплаты:
+⏰ За 24ч: {count_24h} платежей · {sum_24h}₽
+    🔍 По тарифам (24ч):
+{tariffs_text}
+📆 За 7 дней: {count_7days} платежей · {sum_7days}₽
+📊 Всего: {count_total} платежей · {sum_total}₽
+
+👥 Приглашенных сегодня: {invited_today}"""
+
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return "❌ Ошибка получения статистики"
@@ -674,14 +725,23 @@ class VKBot:
                             short_prompt = (prompt[:80] + '...') if prompt and len(prompt) > 80 else (prompt or '—')
                             urls_text = ""
                             if audio_url:
-                                try:
-                                    import json as _json
-                                    urls = _json.loads(audio_url) if audio_url.startswith('[') else [audio_url]
-                                    for i, url in enumerate(urls, 1):
-                                        label = f"Вариант {i}" if len(urls) > 1 else "Слушать"
-                                        urls_text += f"\n🔗 {label}: {url}"
-                                except Exception:
-                                    urls_text = f"\n🔗 Слушать: {audio_url}"
+                                # Убираем служебные префиксы мониторинга (добавляются после уведомления)
+                                real_url = audio_url
+                                for prefix in ('ALREADY_NOTIFIED_', 'ALREADY_SENT_'):
+                                    if isinstance(audio_url, str) and audio_url.startswith(prefix):
+                                        real_url = audio_url[len(prefix):]
+                                        break
+                                if real_url == 'ERROR_NOTIFIED':
+                                    urls_text = "\n❌ Ошибка генерации"
+                                else:
+                                    try:
+                                        import json as _json
+                                        urls = _json.loads(real_url) if real_url.startswith('[') else [real_url]
+                                        for i, url in enumerate(urls, 1):
+                                            label = f"Вариант {i}" if len(urls) > 1 else "Слушать"
+                                            urls_text += f"\n🔗 {label}: {url}"
+                                    except Exception:
+                                        urls_text = f"\n🔗 Слушать: {real_url}"
                             track_msg = (
                                 f"🎼 Трек #{idx} ({date_str})\n"
                                 f"📝 {short_prompt}"
@@ -1430,12 +1490,26 @@ class VKBot:
 
             # Обработка выбора жанра для инструментальной музыки
             elif vk_state == States.WAITING_MUSIC_STYLE:
+                # Проверяем, выбрал ли пользователь "Свой вариант"
+                if "свой вариант" in text_lower:
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.set_state(user_id, States.WAITING_CUSTOM_STYLE)
+                    )
+                    self.send_message(
+                        user_id=user_id,
+                        message="✏️ Опишите стиль и жанр музыки своими словами:\n\nНапример: «медленный джаз с саксофоном» или «агрессивный дабстеп»",
+                        keyboard=self.get_cancel_keyboard()
+                    )
+                    logger.info(f"✅ Пользователь {user_id} выбрал ввод своего стиля для инструментала")
+                    command_handled = True
+                    return
+
                 genre = text  # Выбранный жанр
-                
+
                 # Переводим жанр на английский для Suno API
                 translated_genre = translate_style_to_english(genre, add_improvements=False)
                 logger.info(f"🔄 Перевод жанра для музыки: '{genre}' → '{translated_genre}'")
-                
+
                 # Используем переведенный жанр
                 genre = translated_genre
                 logger.info(f"🎶 Пользователь {user_id} выбрал жанр для инструментала: {genre}")
@@ -1573,6 +1647,103 @@ class VKBot:
 
                 music_thread = threading.Thread(target=generate_instrumental_thread, daemon=True)
                 music_thread.start()
+
+                command_handled = True
+                return
+
+            # Обработка ввода своего стиля для инструментальной музыки (после выбора "Свой вариант")
+            elif vk_state == States.WAITING_CUSTOM_STYLE:
+                genre = text  # Пользователь ввёл свой стиль
+
+                # Переводим жанр на английский для Suno API
+                translated_genre = translate_style_to_english(genre, add_improvements=False)
+                logger.info(f"🔄 Перевод своего стиля для музыки: '{genre}' → '{translated_genre}'")
+
+                genre = translated_genre
+                logger.info(f"🎶 Пользователь {user_id} ввёл свой жанр для инструментала: {genre}")
+
+                # Сбрасываем состояние ДО запуска потока
+                self.reset_state(user_id)
+
+                # Отправляем сообщение о начале генерации
+                self.send_message(
+                    user_id=user_id,
+                    message="🎵 Генерация началась. Это займет 3-5 минут. Результат пришлю сюда в чат",
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+
+                # Запускаем генерацию в отдельном потоке
+                import threading
+                _genre_cs = genre
+                _uid_cs = user_id
+
+                def generate_custom_instrumental_thread():
+                    try:
+                        result = generate_suno_music_sync(
+                            prompt=_genre_cs,
+                            is_song=False,
+                            custom_mode=False,
+                            user_id=_uid_cs
+                        )
+
+                        if result:
+                            audio_url = None
+                            suno_task_id = None
+                            suno_audio_id = None
+                            if isinstance(result, tuple):
+                                audio_url = result[0] if len(result) > 0 else None
+                                suno_task_id = result[1] if len(result) > 1 else None
+                                suno_audio_id = result[2] if len(result) > 2 else None
+                            else:
+                                audio_url = result
+
+                            if audio_url:
+                                import uuid
+                                db_task_id = str(uuid.uuid4())
+                                try:
+                                    execute_query_sync(
+                                        'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                                        (_uid_cs, db_task_id, _genre_cs, audio_url, False, False, suno_task_id, suno_audio_id, 'completed')
+                                    )
+                                except Exception as db_err:
+                                    logger.error(f"❌ Ошибка записи в БД: {db_err}")
+
+                                self.send_message(
+                                    user_id=_uid_cs,
+                                    message=(
+                                        f"✅ Ваша инструментальная музыка готова!\n\n"
+                                        f"🎵 Стиль: {_genre_cs}\n\n"
+                                    ),
+                                    keyboard=self.get_main_keyboard(_uid_cs)
+                                )
+                                self.send_message(
+                                    user_id=_uid_cs,
+                                    message=f"🔗 Слушать: {audio_url}"
+                                )
+                                logger.info(f"✅ Инструментальная музыка готова для {_uid_cs}: {audio_url}")
+                            else:
+                                self.send_message(
+                                    user_id=_uid_cs,
+                                    message="❌ Не удалось получить аудио. Попробуйте другой стиль или позже.",
+                                    keyboard=self.get_main_keyboard(_uid_cs)
+                                )
+                        else:
+                            self.send_message(
+                                user_id=_uid_cs,
+                                message="❌ Не удалось сгенерировать музыку. Попробуйте другой стиль или позже.",
+                                keyboard=self.get_main_keyboard(_uid_cs)
+                            )
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка в потоке генерации своего стиля: {e}")
+                        logger.error(traceback.format_exc())
+                        self.send_message(
+                            user_id=_uid_cs,
+                            message="❌ Произошла ошибка при генерации. Попробуйте позже.",
+                            keyboard=self.get_main_keyboard(_uid_cs)
+                        )
+
+                cs_thread = threading.Thread(target=generate_custom_instrumental_thread, daemon=True)
+                cs_thread.start()
 
                 command_handled = True
                 return
