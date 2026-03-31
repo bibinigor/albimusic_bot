@@ -699,7 +699,7 @@ class VKBot:
                 logger.info(f"📂 Запрос треков от пользователя {user_id}")
                 try:
                     tracks = execute_query_sync(
-                        """SELECT task_id, prompt, audio_url, created_at
+                        """SELECT task_id, prompt, audio_url, created_at, suno_audio_id
                            FROM generations
                            WHERE user_id = %s
                            ORDER BY id DESC LIMIT 10""",
@@ -717,7 +717,7 @@ class VKBot:
                             message=f"🎵 Ваши последние треки ({len(tracks)} шт.):\n━━━━━━━━━━━━━━━━━",
                             keyboard=self.get_main_keyboard(user_id)
                         )
-                        for idx, (task_id, prompt, audio_url, created_at) in enumerate(tracks, 1):
+                        for idx, (task_id, prompt, audio_url, created_at, suno_audio_id) in enumerate(tracks, 1):
                             try:
                                 date_str = created_at.strftime("%d.%m.%Y") if hasattr(created_at, 'strftime') else str(created_at)[:10]
                             except Exception:
@@ -732,7 +732,18 @@ class VKBot:
                                         real_url = audio_url[len(prefix):]
                                         break
                                 if real_url == 'ERROR_NOTIFIED':
-                                    urls_text = "\n❌ Ошибка генерации"
+                                    # Пробуем восстановить ссылки через suno_audio_id
+                                    if suno_audio_id:
+                                        try:
+                                            import json as _json2
+                                            sids = _json2.loads(suno_audio_id) if isinstance(suno_audio_id, str) and suno_audio_id.startswith('[') else [suno_audio_id]
+                                            for i, sid in enumerate(sids, 1):
+                                                label = f"Вариант {i}" if len(sids) > 1 else "Слушать"
+                                                urls_text += f"\n🔗 {label}: https://cdn1.suno.ai/{sid}.mp3"
+                                        except Exception:
+                                            urls_text = f"\n🔗 Слушать: https://cdn1.suno.ai/{suno_audio_id}.mp3"
+                                    else:
+                                        urls_text = "\n❌ Ошибка генерации"
                                 else:
                                     try:
                                         import json as _json
