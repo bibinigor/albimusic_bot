@@ -192,8 +192,8 @@ class VKBot:
         self.longpoll = VkBotLongPoll(self.vk_session, group_id=VK_GROUP_ID)
         logger.info("VK Bot initialized successfully")
 
-    def send_message(self, user_id, message, keyboard=None, max_retries=3):
-        """Send message to user with optional keyboard"""
+    def send_message(self, user_id, message, keyboard=None, attachment=None, max_retries=3):
+        """Send message to user with optional keyboard and/or attachment"""
         retries = 0
         while retries < max_retries:
             try:
@@ -206,6 +206,10 @@ class VKBot:
                 if keyboard:
                     # Преобразуем клавиатуру в JSON строку с помощью метода get_keyboard()
                     params['keyboard'] = keyboard.get_keyboard()
+
+                if attachment:
+                    # Вложение: аудио-сообщение, документ и т.д. (формат 'doc{owner}_{id}')
+                    params['attachment'] = attachment
                     
                 self.vk.messages.send(**params)
                 return True
@@ -236,6 +240,94 @@ class VKBot:
                         return False
         
         return False
+
+    def upload_mp3_as_vk_doc(self, user_id, cdn_url, title="ALBI Music"):
+        """Скачивает MP3 с CDN Suno и загружает в VK как аудио-вложение.
+
+        Алгоритм:
+          1. Скачиваем MP3 во временный файл через requests.
+          2. Пробуем загрузить как audio_message — плеер прямо в VK-чате (▶ играет inline).
+          3. Если audio_message недоступен для группы — fallback: document_message (MP3 как файл).
+          4. Временный файл удаляется в блоке finally.
+
+        Args:
+            user_id:  ID пользователя VK (нужен как peer_id при загрузке)
+            cdn_url:  URL MP3 файла (CDN Suno)
+            title:    Название трека (отображается в плеере)
+
+        Returns:
+            str: строка вложения 'doc{owner_id}_{id}' для messages.send(attachment=...)
+                 или None при ошибке
+        """
+        import tempfile
+        import os
+        import requests as _req
+        from vk_api import VkUpload
+
+        temp_path = None
+        try:
+            # ── Шаг 1: скачиваем MP3 во временный файл ──────────────────────────
+            logger.info(f"📥 Скачиваем MP3 для загрузки в VK: {cdn_url[:80]}...")
+            resp = _req.get(cdn_url, timeout=60, stream=True)
+            resp.raise_for_status()
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                temp_path = tmp.name
+                for chunk in resp.iter_content(chunk_size=8192):
+                    tmp.write(chunk)
+
+            size_kb = os.path.getsize(temp_path) // 1024
+            logger.info(f"✅ MP3 скачан — {size_kb} КБ → {temp_path}")
+
+            # ── Шаг 2: audio_message (inline-плеер в чате) ───────────────────────
+            try:
+                server = self.vk.docs.getMessagesUploadServer(
+                    type='audio_message',
+                    peer_id=user_id
+                )
+                upload_url = server['upload_url']
+
+                with open(temp_path, 'rb') as f:
+                    up_resp = _req.post(
+                        upload_url,
+                        files={'file': (f'{title}.mp3', f, 'audio/mpeg')}
+                    )
+                up_data = up_resp.json()
+
+                save_result = self.vk.docs.save(file=up_data['file'], title=title)
+
+                # VK возвращает ключ 'audio_message' или 'doc' в зависимости от версии
+                doc = save_result.get('audio_message') or save_result.get('doc')
+                if doc:
+                    attachment = f"doc{doc['owner_id']}_{doc['id']}"
+                    logger.info(f"✅ Загружен как audio_message (inline-плеер): {attachment}")
+                    return attachment
+
+            except Exception as am_err:
+                logger.warning(
+                    f"⚠️ audio_message недоступен ({am_err}), "
+                    f"переключаемся на document_message..."
+                )
+
+            # ── Шаг 3: fallback — обычный документ (MP3 как вложение-файл) ───────
+            upload = VkUpload(self.vk_session)
+            doc_result = upload.document_message(temp_path, peer_id=user_id, title=title)
+            attachment = f"doc{doc_result['doc']['owner_id']}_{doc_result['doc']['id']}"
+            logger.info(f"✅ Загружен как document_message: {attachment}")
+            return attachment
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка upload_mp3_as_vk_doc ({cdn_url[:60]}): {e}")
+            return None
+
+        finally:
+            # Всегда удаляем временный файл, даже если произошла ошибка
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                    logger.debug(f"🗑️ Temp-файл удалён: {temp_path}")
+                except Exception:
+                    pass
 
     def get_main_keyboard(self, user_id):
         """Create main menu keyboard"""
@@ -1250,7 +1342,7 @@ class VKBot:
                         user_id=user_id,
                         message=(
                             "Опишите жанр и стиль песни своими словами:\n\n"
-                            "⚠️ Максимальная длина описания — 230 символов.\n"
+                            "⚠️ Максимальная длина описания — 400 символов.\n"
                             "Пример: «Энергичный поп-рок, яркие гитары, женский вокал»"
                         ),
                         keyboard=self.get_cancel_keyboard()
@@ -1287,7 +1379,7 @@ class VKBot:
             # Обработка ввода своего жанра
             elif vk_state == States.WAITING_CUSTOM_GENRE:
                 # Проверяем длину описания жанра
-                MAX_GENRE_LENGTH = 230
+                MAX_GENRE_LENGTH = 400
                 if len(text) > MAX_GENRE_LENGTH:
                     self.send_message(
                         user_id=user_id,
@@ -1451,23 +1543,43 @@ class VKBot:
                                     if len(audio_urls) > 1:
                                         message_text += f"🎼 Сгенерировано {len(audio_urls)} варианта\n\n"
                                     
-                                    message_text += "👇 Выберите вариант для прослушивания:"
+                                    message_text += "🎧 Слушайте треки прямо здесь — нажмите ▶"
                                 except Exception as json_error:
                                     # Если не удалось распарсить JSON, логируем ошибку
                                     logger.error(f"❌ Ошибка при парсинге JSON аудио URL: {json_error}")
-                                    message_text += "👇 Слушайте вашу песню:"
+                                    message_text += "🎧 Слушайте вашу песню прямо здесь:"
                                 
-                                # Отправляем сообщение с кнопками для прослушивания
-                                # suno_audio_id передаём чтобы кнопка "Слушать" открывала
-                                # Suno веб-плеер (не скачивала файл, удобно на телефоне)
+                                # Отправляем сообщение с кнопкой "Скачать" (Слушать — inline ниже)
                                 from vk_keyboards import get_music_result_keyboard
-                                song_keyboard = get_music_result_keyboard(audio_url, suno_ids=suno_audio_id)
+                                song_keyboard = get_music_result_keyboard(audio_url)
                                 
                                 self.send_message(
                                     user_id=user_id,
                                     message=message_text,
                                     keyboard=song_keyboard
                                 )
+
+                                # Загружаем каждый трек в VK и отправляем как inline аудио (▶ в чате)
+                                try:
+                                    import json as _json_am
+                                    try:
+                                        _am_urls = _json_am.loads(audio_url) if isinstance(audio_url, str) and audio_url.startswith('[') else [audio_url]
+                                    except Exception:
+                                        _am_urls = [str(audio_url)]
+                                    for _am_i, _am_url in enumerate(_am_urls, 1):
+                                        _am_title = f"ALBI Music — вариант {_am_i}" if len(_am_urls) > 1 else "ALBI Music AI Song"
+                                        _am_label = f"🎵 Вариант {_am_i}" if len(_am_urls) > 1 else "🎵 Ваша песня"
+                                        _am_att = self.upload_mp3_as_vk_doc(user_id, _am_url, _am_title)
+                                        if _am_att:
+                                            self.send_message(
+                                                user_id=user_id,
+                                                message=_am_label,
+                                                attachment=_am_att
+                                            )
+                                        else:
+                                            logger.warning(f"⚠️ Трек {_am_i}: не удалось загрузить в VK как аудио")
+                                except Exception as _am_err:
+                                    logger.error(f"❌ Ошибка при отправке аудио-вложений для песни: {_am_err}")
                                 
                                 # Отправляем отдельное сообщение с опциями (минусовка, кавер и т.д.)
                                 if suno_task_id:
@@ -1569,7 +1681,7 @@ class VKBot:
                         user_id=user_id,
                         message=(
                             "✏️ Опишите стиль и жанр музыки своими словами:\n\n"
-                            "⚠️ Максимальная длина описания — 230 символов.\n"
+                            "⚠️ Максимальная длина описания — 400 символов.\n"
                             "Пример: «медленный джаз с саксофоном» или «агрессивный дабстеп»"
                         ),
                         keyboard=self.get_cancel_keyboard()
@@ -1676,18 +1788,39 @@ class VKBot:
                             if len(urls) > 1:
                                 result_msg += f"🎼 Сгенерировано {len(urls)} варианта\n\n"
                             
-                            result_msg += "👇 Выберите вариант для прослушивания:"
+                            result_msg += "🎧 Слушайте треки прямо здесь — нажмите ▶"
 
-                            # Отправляем сообщение с красивыми кнопками
-                            # suno_audio_id → кнопка "Слушать" открывает Suno веб-плеер
+                            # Отправляем сообщение с кнопкой "Скачать" (Слушать — inline ниже)
                             from vk_keyboards import get_music_result_keyboard
-                            music_keyboard = get_music_result_keyboard(audio_url, suno_ids=suno_audio_id)
-                            
+                            music_keyboard = get_music_result_keyboard(audio_url)
+
                             self.send_message(
                                 user_id=_uid,
                                 message=result_msg,
                                 keyboard=music_keyboard
                             )
+
+                            # Загружаем каждый трек в VK и отправляем как inline аудио (▶ в чате)
+                            try:
+                                import json as _json_im
+                                try:
+                                    _im_urls = _json_im.loads(audio_url) if isinstance(audio_url, str) and audio_url.startswith('[') else [audio_url]
+                                except Exception:
+                                    _im_urls = [str(audio_url)]
+                                for _im_i, _im_url in enumerate(_im_urls, 1):
+                                    _im_title = f"ALBI Music — вариант {_im_i}" if len(_im_urls) > 1 else "ALBI Music Instrumental"
+                                    _im_label = f"🎵 Вариант {_im_i}" if len(_im_urls) > 1 else "🎵 Ваша музыка"
+                                    _im_att = self.upload_mp3_as_vk_doc(_uid, _im_url, _im_title)
+                                    if _im_att:
+                                        self.send_message(
+                                            user_id=_uid,
+                                            message=_im_label,
+                                            attachment=_im_att
+                                        )
+                                    else:
+                                        logger.warning(f"⚠️ Инструментал трек {_im_i}: не удалось загрузить в VK как аудио")
+                            except Exception as _im_err:
+                                logger.error(f"❌ Ошибка при отправке аудио-вложений для инструментала: {_im_err}")
                             
                             # Затем отправляем главное меню отдельным сообщением
                             self.send_message(
@@ -1729,7 +1862,7 @@ class VKBot:
             # Обработка ввода своего стиля для инструментальной музыки (после выбора "Свой вариант")
             elif vk_state == States.WAITING_CUSTOM_STYLE:
                 # Проверяем длину описания стиля
-                MAX_GENRE_LENGTH = 230
+                MAX_GENRE_LENGTH = 400
                 if len(text) > MAX_GENRE_LENGTH:
                     self.send_message(
                         user_id=user_id,
