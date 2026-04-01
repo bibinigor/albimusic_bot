@@ -422,29 +422,62 @@ def get_track_actions_keyboard(task_id, has_two_variants=False):
     
     return keyboard
 
-def get_music_result_keyboard(urls, task_id=None):
-    """Клавиатура с ссылками на варианты музыки (openlink-кнопки)"""
-    keyboard = VkKeyboard(inline=True)
+def get_music_result_keyboard(urls, task_id=None, suno_ids=None):
+    """Клавиатура с ссылками на варианты музыки.
     
-    # Парсим URL (может быть JSON массив или одна ссылка)
+    Для каждого трека показывает две кнопки в одной строке:
+      🎧 Слушать  — открывает Suno веб-плеер (без скачивания, удобно на телефоне)
+      ⬇️ Скачать  — прямая CDN-ссылка для сохранения MP3
+    
+    Args:
+        urls:      str или list — CDN-ссылки на MP3 (может быть JSON-массив)
+        task_id:   опционально, не используется в этой функции
+        suno_ids:  str или list — ID треков Suno (может быть JSON-массив или строка)
+    """
+    import json as _json
+
+    keyboard = VkKeyboard(inline=True)
+
+    # --- Парсим CDN-ссылки ---
     try:
-        import json as _json
         url_list = _json.loads(urls) if isinstance(urls, str) and urls.startswith('[') else [urls]
     except Exception:
-        url_list = [urls] if isinstance(urls, str) else urls
-    
-    # Добавляем кнопки для каждого варианта
-    for i, url in enumerate(url_list, 1):
-        if len(url_list) > 1:
-            label = f"🎧 Слушать вариант {i}"
-        else:
-            label = "🎧 Слушать"
-        
+        url_list = [urls] if isinstance(urls, str) else list(urls)
+
+    # --- Парсим Suno ID-шники ---
+    sid_list = []
+    if suno_ids:
+        try:
+            if isinstance(suno_ids, str) and suno_ids.startswith('['):
+                sid_list = _json.loads(suno_ids)
+            elif isinstance(suno_ids, str):
+                sid_list = [suno_ids]
+            elif isinstance(suno_ids, list):
+                sid_list = suno_ids
+        except Exception:
+            sid_list = [str(suno_ids)] if suno_ids else []
+
+    # --- Добавляем кнопки для каждого варианта ---
+    for i, cdn_url in enumerate(url_list, 1):
+        variant_label = f" вариант {i}" if len(url_list) > 1 else ""
+
+        # Ссылка для прослушивания: Suno веб-плеер (если есть ID) или CDN
+        suno_id = sid_list[i - 1] if i - 1 < len(sid_list) else None
+        listen_url = f"https://suno.com/song/{suno_id}" if suno_id else cdn_url
+
+        # Кнопка "Слушать" — открывает плеер, НЕ скачивает
         keyboard.add_openlink_button(
-            label=label,
-            link=url
+            label=f"🎧 Слушать{variant_label}",
+            link=listen_url
         )
-        if i < len(url_list):  # Добавляем новую строку между кнопками
+
+        # Кнопка "Скачать" — прямой MP3 для сохранения
+        keyboard.add_openlink_button(
+            label=f"⬇️ Скачать{variant_label}",
+            link=cdn_url
+        )
+
+        if i < len(url_list):
             keyboard.add_line()
-    
+
     return keyboard

@@ -1418,8 +1418,10 @@ class VKBot:
                                     message_text += "👇 Слушайте вашу песню:"
                                 
                                 # Отправляем сообщение с кнопками для прослушивания
+                                # suno_audio_id передаём чтобы кнопка "Слушать" открывала
+                                # Suno веб-плеер (не скачивала файл, удобно на телефоне)
                                 from vk_keyboards import get_music_result_keyboard
-                                song_keyboard = get_music_result_keyboard(audio_url)
+                                song_keyboard = get_music_result_keyboard(audio_url, suno_ids=suno_audio_id)
                                 
                                 self.send_message(
                                     user_id=user_id,
@@ -1637,8 +1639,9 @@ class VKBot:
                             result_msg += "👇 Выберите вариант для прослушивания:"
 
                             # Отправляем сообщение с красивыми кнопками
+                            # suno_audio_id → кнопка "Слушать" открывает Suno веб-плеер
                             from vk_keyboards import get_music_result_keyboard
-                            music_keyboard = get_music_result_keyboard(audio_url)
+                            music_keyboard = get_music_result_keyboard(audio_url, suno_ids=suno_audio_id)
                             
                             self.send_message(
                                 user_id=_uid,
