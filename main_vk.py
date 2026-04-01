@@ -246,8 +246,12 @@ class VKBot:
 
         Алгоритм:
           1. Скачиваем MP3 во временный файл через requests.
-          2. Пробуем загрузить как audio_message — плеер прямо в VK-чате (▶ играет inline).
-          3. Если audio_message недоступен для группы — fallback: document_message (MP3 как файл).
+             Таймаут на соединение — 30 с, на чтение (между чанками) — 120 с.
+             chunk_size увеличен до 64 КБ, чтобы полностью скачать файл.
+          2. Пробуем загрузить как audio_message — inline-плеер (▶) в VK-чате.
+             ВАЖНО: POST-загрузка на сервер VK теперь имеет явный таймаут (180 с),
+             иначе при медленном соединении VK получает усечённый файл → песня обрезается.
+          3. Если audio_message недоступен — fallback: document_message (MP3 как файл).
           4. Временный файл удаляется в блоке finally.
 
         Args:
@@ -268,18 +272,32 @@ class VKBot:
         try:
             # ── Шаг 1: скачиваем MP3 во временный файл ──────────────────────────
             logger.info(f"📥 Скачиваем MP3 для загрузки в VK: {cdn_url[:80]}...")
-            resp = _req.get(cdn_url, timeout=60, stream=True)
+            # timeout=(connect, read) — 30 с на соединение, 120 с между чанками
+            resp = _req.get(cdn_url, timeout=(30, 120), stream=True)
             resp.raise_for_status()
+
+            # Проверяем ожидаемый размер файла (если CDN отдаёт Content-Length)
+            expected_size = int(resp.headers.get('Content-Length', 0))
 
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
                 temp_path = tmp.name
-                for chunk in resp.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        tmp.write(chunk)
 
-            size_kb = os.path.getsize(temp_path) // 1024
+            actual_size = os.path.getsize(temp_path)
+            size_kb = actual_size // 1024
             logger.info(f"✅ MP3 скачан — {size_kb} КБ → {temp_path}")
 
-            # ── Шаг 2: audio_message (inline-плеер в чате) ───────────────────────
+            # Предупреждаем, если файл скачан не полностью
+            if expected_size > 0 and actual_size < expected_size:
+                logger.warning(
+                    f"⚠️ Файл скачан не полностью: {actual_size} / {expected_size} байт"
+                )
+
+            # ── Шаг 2: audio_message (inline-плеер ▶ прямо в чате) ──────────────
+            # POST загружается с таймаутом (30 с connect, 180 с upload),
+            # иначе VK может получить усечённый файл и обрезать трек.
             try:
                 server = self.vk.docs.getMessagesUploadServer(
                     type='audio_message',
@@ -290,7 +308,8 @@ class VKBot:
                 with open(temp_path, 'rb') as f:
                     up_resp = _req.post(
                         upload_url,
-                        files={'file': (f'{title}.mp3', f, 'audio/mpeg')}
+                        files={'file': (f'{title}.mp3', f, 'audio/mpeg')},
+                        timeout=(30, 180)   # ← явный таймаут загрузки (исправление обрезки)
                     )
                 up_data = up_resp.json()
 
