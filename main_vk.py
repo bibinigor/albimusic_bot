@@ -29,6 +29,15 @@ from celery_tasks import (
     generate_wav_task
 )
 
+# Импортируем модуль администрирования (рассылка)
+try:
+    from vk_admin import get_all_user_ids, format_broadcast_confirmation, format_broadcast_result
+    HAS_VK_ADMIN = True
+except ImportError:
+    HAS_VK_ADMIN = False
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("⚠️ vk_admin.py не найден — функция рассылки недоступна")
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -819,12 +828,20 @@ class VKBot:
                 
                 # Получаем статистику
                 stats_text = self.get_admin_stats()
-                
-                # Отправляем статистику администратору
+
+                # Показываем панель с кнопкой рассылки
+                from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+                admin_kb = VkKeyboard(inline=True)
+                admin_kb.add_callback_button(
+                    "📨 Рассылка",
+                    color=VkKeyboardColor.POSITIVE,
+                    payload={"cmd": "admin_broadcast"}
+                )
+
                 self.send_message(
                     user_id=user_id,
                     message=f"👨‍💻 **Панель администратора**\n\n{stats_text}",
-                    keyboard=self.get_main_keyboard(user_id)
+                    keyboard=admin_kb
                 )
                 command_handled = True
                 return
@@ -840,6 +857,29 @@ class VKBot:
                 self.reset_state(user_id)
                 vk_state = States.START
             
+            # ──── ОБРАБОТКА СОСТОЯНИЙ РАССЫЛКИ (ADMIN) ────
+            if vk_state == States.WAITING_BROADCAST_TEXT:
+                if text_lower in ['отмена', 'cancel']:
+                    asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.finish(user_id)
+                    )
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Рассылка отменена",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+                else:
+                    self._handle_broadcast_text(user_id, text)
+                return
+
+            if vk_state == States.WAITING_BROADCAST_CONFIRM:
+                # Подтверждение происходит через callback-кнопки — текст игнорируем
+                self.send_message(
+                    user_id=user_id,
+                    message="⚠️ Нажмите кнопку «✅ Отправить всем» или «❌ Отмена»"
+                )
+                return
+
             # Обработка выбора типа текста
             if vk_state == States.CHOOSING_TEXT_TYPE:
                 if "ai-текст" in text_lower or "придумать текст" in text_lower or "🤖 ai-текст" in text_lower:
@@ -2025,6 +2065,104 @@ class VKBot:
             )
             self.reset_state(user_id)
     
+    # ════════════════════════════════════════════════════════════════
+    # РАССЫЛКА — методы
+    # ════════════════════════════════════════════════════════════════
+
+    def _handle_broadcast_start(self, user_id):
+        """Начать процесс рассылки: перевести администратора в состояние ввода текста"""
+        asyncio.get_event_loop().run_until_complete(
+            self.state_manager.set_state(user_id, States.WAITING_BROADCAST_TEXT)
+        )
+        self.send_message(
+            user_id,
+            "📨 **РАССЫЛКА ALBI MUSIC**\n\n"
+            "Отправьте текст сообщения для рассылки всем пользователям.\n\n"
+            "⚠️ Напишите «отмена» для отмены."
+        )
+
+    def _handle_broadcast_text(self, user_id, text):
+        """Получить текст рассылки и показать предпросмотр с кнопками подтверждения"""
+        if not HAS_VK_ADMIN:
+            self.send_message(user_id, "❌ Модуль vk_admin не найден — рассылка недоступна")
+            asyncio.get_event_loop().run_until_complete(self.state_manager.finish(user_id))
+            return
+
+        total_users = len(get_all_user_ids())
+        confirmation_text = format_broadcast_confirmation(text, total_users)
+
+        # Сохраняем текст в данных состояния
+        asyncio.get_event_loop().run_until_complete(
+            self.state_manager.update_data(user_id, broadcast_text=text)
+        )
+        asyncio.get_event_loop().run_until_complete(
+            self.state_manager.set_state(user_id, States.WAITING_BROADCAST_CONFIRM)
+        )
+
+        from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+        keyboard = VkKeyboard(inline=True)
+        keyboard.add_callback_button(
+            "✅ Отправить всем",
+            color=VkKeyboardColor.POSITIVE,
+            payload={"cmd": "broadcast_confirm"}
+        )
+        keyboard.add_callback_button(
+            "❌ Отмена",
+            color=VkKeyboardColor.NEGATIVE,
+            payload={"cmd": "broadcast_cancel"}
+        )
+
+        self.send_message(user_id, confirmation_text, keyboard=keyboard)
+
+    def _handle_broadcast_confirm(self, user_id):
+        """Выполнить рассылку после подтверждения"""
+        if not HAS_VK_ADMIN:
+            self.send_message(user_id, "❌ Модуль vk_admin не найден")
+            asyncio.get_event_loop().run_until_complete(self.state_manager.finish(user_id))
+            return
+
+        data = asyncio.get_event_loop().run_until_complete(
+            self.state_manager.get_data(user_id)
+        )
+
+        if not data or 'broadcast_text' not in data:
+            self.send_message(
+                user_id,
+                "❌ Ошибка: текст рассылки не найден. Начните заново.",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+            asyncio.get_event_loop().run_until_complete(self.state_manager.finish(user_id))
+            return
+
+        text = data['broadcast_text']
+
+        # Сбрасываем состояние ДО рассылки
+        asyncio.get_event_loop().run_until_complete(self.state_manager.finish(user_id))
+
+        user_ids = get_all_user_ids()
+
+        self.send_message(
+            user_id,
+            f"🚀 **Рассылка запущена!**\n\n"
+            f"📨 Начинаю отправку {len(user_ids)} пользователям...\n"
+            f"⏳ Пришлю итог когда закончу."
+        )
+
+        sent = 0
+        errors = 0
+        for target_uid in user_ids:
+            try:
+                self.send_message(target_uid, text)
+                sent += 1
+                time.sleep(0.5)  # Задержка против антиспама VK
+            except Exception as e:
+                logger.warning(f"Ошибка отправки пользователю {target_uid}: {e}")
+                errors += 1
+
+        result_text = format_broadcast_result(sent, errors)
+        self.send_message(user_id, result_text, keyboard=self.get_main_keyboard(user_id))
+        logger.info(f"✅ Рассылка завершена: отправлено {sent}, ошибок {errors}")
+
     def handle_callback(self, event):
         """Обработчик событий от кнопок (callback)"""
         try:
@@ -2051,7 +2189,32 @@ class VKBot:
             # Обработка различных действий из payload
             action = payload.get('action')
             task_id_from_payload = payload.get('task_id', '')
-            
+
+            # ──── ADMIN CMD-КНОПКИ (рассылка) ────
+            cmd = payload.get('cmd')
+            if cmd:
+                if cmd == 'admin_broadcast':
+                    if user_id in ADMIN_IDS:
+                        self._handle_broadcast_start(user_id)
+                    else:
+                        self.send_message(user_id, "❌ Доступ запрещён")
+                    return
+                elif cmd == 'broadcast_confirm':
+                    if user_id in ADMIN_IDS:
+                        self._handle_broadcast_confirm(user_id)
+                    return
+                elif cmd == 'broadcast_cancel':
+                    if user_id in ADMIN_IDS:
+                        asyncio.get_event_loop().run_until_complete(
+                            self.state_manager.finish(user_id)
+                        )
+                        self.send_message(
+                            user_id,
+                            "❌ Рассылка отменена",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                    return
+
             # Обработка кнопок оплаты
             if action == "payment":
                 amount = payload.get('amount', 0)

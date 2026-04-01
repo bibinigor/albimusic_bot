@@ -37,6 +37,10 @@ class States(Enum):
     WAITING_SUPPORT_MESSAGE = auto()
     WAITING_SUPPORT_REPLY = auto()
 
+    # Состояния администрирования (рассылка)
+    WAITING_BROADCAST_TEXT = auto()
+    WAITING_BROADCAST_CONFIRM = auto()
+
 @dataclass
 class StateData:
     """Данные состояния пользователя"""

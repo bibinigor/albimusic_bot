@@ -769,13 +769,23 @@ async def get_user_history(user_id: int = Depends(get_current_user), limit: int 
             }
 
             if status_value == "completed" and audio_url:
-                try:
-                    urls = json.loads(audio_url) if isinstance(audio_url, str) else audio_url
-                    item["audio_urls"] = urls
-                    item["is_demo"] = not audio_url.startswith("ALR_")
-                except:
-                    item["audio_urls"] = [audio_url]
-                    item["is_demo"] = True
+                # Убираем служебные префиксы мониторинга (добавляются после уведомления)
+                real_url = audio_url
+                for prefix in ('ALREADY_NOTIFIED_', 'ALREADY_SENT_'):
+                    if isinstance(real_url, str) and real_url.startswith(prefix):
+                        real_url = real_url[len(prefix):]
+                        break
+                if real_url == 'ERROR_NOTIFIED':
+                    item["audio_urls"] = []
+                    item["is_demo"] = False
+                else:
+                    try:
+                        urls = json.loads(real_url) if isinstance(real_url, str) else real_url
+                        item["audio_urls"] = urls
+                        item["is_demo"] = not real_url.startswith("ALR_")
+                    except:
+                        item["audio_urls"] = [real_url]
+                        item["is_demo"] = True
 
             history.append(item)
 

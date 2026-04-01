@@ -1,131 +1,201 @@
 # 📍 Справочник расположения ботов ALBI Music
 
+> **Используй этот файл при любой отладке** — здесь актуальные пути, сервисы и команды.
+
+---
+
 ## 🤖 Telegram бот
-**Основной файл:** `/root/albimusic-bot/bot.py`
-**Конфигурация:** `/root/albimusic-bot/config.py`
-**Сервис:** `albimusic-bot.service`
+
+| Параметр | Значение |
+|---|---|
+| **Основной файл** | `/root/albimusic-bot/main_with_payments.py` |
+| **Конфигурация** | `/root/albimusic-bot/config.py` |
+| **venv** | `/root/albimusic-bot/venv/` |
+| **Сервис** | `albimusic-bot.service` |
+
 ```bash
 # Управление
 systemctl status albimusic-bot
 systemctl restart albimusic-bot
 systemctl stop albimusic-bot
-systemctl start albimusic-bot
 
-# Логи
+# Логи (live)
 journalctl -u albimusic-bot -f
+
+# Найти ошибки
+journalctl -u albimusic-bot -n 100 --no-pager | grep -i error
 ```
+
+---
 
 ## 📱 ВКонтакте бот
-**Основной файл:** `/root/albimusic-bot/main_vk.py`
-**Конфигурация:** `/root/albimusic-bot/vk_config.py`
-**Клавиатуры:** `/root/albimusic-bot/vk_keyboards.py`
-**Состояния:** `/root/albimusic-bot/vk_states.py`
-**Процесс:** Запускается как python процесс (не systemd сервис)
+
+| Параметр | Значение |
+|---|---|
+| **Основной файл** | `/root/albimusic-bot/main_vk.py` |
+| **Клавиатуры** | `/root/albimusic-bot/vk_keyboards.py` |
+| **Состояния** | `/root/albimusic-bot/vk_states.py` |
+| **Конфигурация** | `/root/albimusic-bot/config.py` |
+| **venv** | `/root/albimusic-bot/venv/` |
+| **Сервис** | `albimusic-vk-bot.service` |
+
+> ⚠️ **ВАЖНО:** VK-бот управляется через **systemd** (`albimusic-vk-bot.service`).
+> **НЕ** запускай его вручную через `nohup python3 main_vk.py &` — это создаст второй экземпляр и бот будет отвечать дважды на каждое сообщение!
+
 ```bash
-# Проверка статуса
+# Управление (ПРАВИЛЬНЫЙ способ)
+systemctl status albimusic-vk-bot
+systemctl restart albimusic-vk-bot
+systemctl stop albimusic-vk-bot
+
+# Логи (live)
+journalctl -u albimusic-vk-bot -f
+
+# Найти ошибки
+journalctl -u albimusic-vk-bot -n 100 --no-pager | grep -i error
+
+# Проверить что только ОДИН процесс запущен (должна быть 1 строка)
 ps aux | grep main_vk.py | grep -v grep
-
-# Остановка
-kill $(ps aux | grep main_vk.py | grep -v grep | awk '{print $2}')
-
-# Запуск
-cd /root/albimusic-bot && nohup python3 main_vk.py > /dev/null 2>&1 &
 ```
 
-## 🌐 Веб-сайт
-**HTML:** `/var/www/albimusic-web/index.html`
-**CSS:** `/var/www/albimusic-web/style.css`
-**Проект HTML:** `/root/albimusic-bot/website/index.html`
-**Сервис:** `albimusic-web.service`
+---
+
+## 🌐 Веб API (сайт albi-music.ru)
+
+| Параметр | Значение |
+|---|---|
+| **Основной файл** | `/root/albimusic-bot/web_api.py` |
+| **venv** | `/root/albimusic-bot/web_venv/` (отдельный!) |
+| **Сервис** | `albimusic-web.service` |
+| **Лог** | `/var/log/albimusic/web-api.log` |
+| **Лог ошибок** | `/var/log/albimusic/web-api-error.log` |
+
 ```bash
 # Управление
 systemctl status albimusic-web
 systemctl restart albimusic-web
+
+# Логи
+tail -f /var/log/albimusic/web-api.log
+tail -f /var/log/albimusic/web-api-error.log
 ```
 
-## 🔧 Общие компоненты (используются всеми ботами)
+---
 
-### Celery Worker
-**Основной файл:** `/root/albimusic-bot/celery_tasks.py`
-**Конфигурация:** `/root/albimusic-bot/celery_config.py`
-**Сервисы:**
-- `celery-worker.service` (основной)
-- `albimusic-celery.service` (дополнительный)
+## ⚙️ Celery Workers (фоновая генерация музыки)
+
+> Запущены **ДВА** celery-сервиса (оба работают параллельно):
+
+### 1. `celery-worker.service`
+```
+celery -A celery_tasks worker -Q generation
+```
+
+### 2. `albimusic-celery.service`
+```
+celery -A celery_tasks.celery_app worker --pool=prefork --concurrency=8 -E -l info --task-events -Q generation
+```
 
 ```bash
 # Управление
-systemctl restart celery-worker
 systemctl status celery-worker
+systemctl restart celery-worker
+
+systemctl status albimusic-celery
 systemctl restart albimusic-celery
 
 # Логи
 journalctl -u celery-worker -f
 journalctl -u albimusic-celery -f
+
+# Найти ошибки в celery
+journalctl -u celery-worker --since "30 minutes ago" --no-pager | grep -iE "error|exception"
 ```
 
-### База данных
-**Утилиты:** `/root/albimusic-bot/db_utils.py`
-**Миграции:** `/root/albimusic-bot/migrations/`
-**Конфигурация:** В `/root/albimusic-bot/config.py`
+> ⚠️ При изменении `celery_tasks.py` — **перезапускать оба** celery-сервиса!
 
-### Мониторинг
-**Файл:** `/root/albimusic-bot/run_monitor_notify.py`
-**Сервис:** `albimusic-monitor.service`
+---
+
+## 📡 Мониторинг
+
+### Основной монитор уведомлений
+| Параметр | Значение |
+|---|---|
+| **Файл** | `/root/albimusic-bot/run_monitor_notify.py` |
+| **Сервис** | `albimusic-monitor.service` |
+
+### Replicate монитор (изображения/видео)
+| Параметр | Значение |
+|---|---|
+| **Файл** | `/root/albimusic-bot/monitor_replicate_tasks.py` |
+| **Сервис** | `albimusic-replicate-monitor.service` |
+
 ```bash
-# Управление
 systemctl status albimusic-monitor
 systemctl restart albimusic-monitor
-```
 
-### Replicate Monitor
-**Сервис:** `albimusic-replicate-monitor.service`
-```bash
 systemctl status albimusic-replicate-monitor
+systemctl restart albimusic-replicate-monitor
 ```
 
-## 📋 Быстрый рестарт всех сервисов
+---
+
+## 🗄️ Инфраструктура
+
+| Компонент | Сервис | Команда |
+|---|---|---|
+| PostgreSQL 14 | `postgresql@14-main.service` | `systemctl status postgresql@14-main` |
+| Redis | `redis.service` | `systemctl status redis` |
+| Nginx | `nginx.service` | `systemctl status nginx` |
+
+---
+
+## 🔍 Быстрая диагностика (скопируй и запусти)
+
 ```bash
-# Перезапуск всех основных компонентов
-systemctl restart celery-worker
-systemctl restart albimusic-celery
-systemctl restart albimusic-monitor
+# 1. Проверить все сервисы проекта
+systemctl list-units --type=service | grep -E "(albi|celery|vk)"
+
+# 2. Все Python-процессы проекта
+ps aux | grep -E "(main_vk|main_with_payments|web_api|run_monitor|monitor_replicate|celery)" | grep -v grep
+
+# 3. Проверить что VK-бот не задвоен (должна быть 1 строка)
+ps aux | grep main_vk.py | grep -v grep | wc -l
+
+# 4. Хвост логов всех сервисов
+journalctl -u albimusic-vk-bot -u albimusic-bot -u albimusic-celery -u celery-worker -n 50 --no-pager
+```
+
+---
+
+## ⚡ Быстрый перезапуск всего
+
+```bash
+# Telegram бот
 systemctl restart albimusic-bot
 
-# Перезапуск ВК бота
-kill $(ps aux | grep main_vk.py | grep -v grep | awk '{print $2}')
-sleep 2
-cd /root/albimusic-bot && nohup python3 main_vk.py > /dev/null 2>&1 &
+# VK бот (ТОЛЬКО через systemd!)
+systemctl restart albimusic-vk-bot
+
+# Оба Celery worker-а
+systemctl restart celery-worker && systemctl restart albimusic-celery
+
+# Веб API
+systemctl restart albimusic-web
+
+# Мониторинг
+systemctl restart albimusic-monitor && systemctl restart albimusic-replicate-monitor
 ```
 
-## 🔍 Полезные команды для диагностики
-
-### Посмотреть все запущенные сервисы проекта
-```bash
-systemctl list-units --type=service | grep -E "(vk|celery|albi)"
-```
-
-### Посмотреть все Python процессы проекта
-```bash
-ps aux | grep -E "(main_vk|bot.py|celery)" | grep -v grep
-```
-
-### Проверить логи Celery за последние 30 минут
-```bash
-journalctl -u celery-worker --since "30 minutes ago" --no-pager
-```
-
-### Найти ошибки в логах
-```bash
-journalctl -u celery-worker -n 100 --no-pager | grep -i error
-journalctl -u albimusic-bot -n 100 --no-pager | grep -i error
-```
+---
 
 ## 📝 Важные замечания
 
-1. **ВК бот** не работает как systemd сервис - это обычный Python процесс
-2. **Telegram бот** работает как systemd сервис `albimusic-bot.service`
-3. **Celery** используется обоими ботами для фоновых задач генерации
-4. **Веб-версия** использует те же `celery_tasks.py` для генерации музыки
-5. При изменении `celery_tasks.py` нужно перезапускать celery-worker
-6. При изменении `main_vk.py` нужно перезапускать процесс ВК бота
-7. При изменении `bot.py` нужно перезапускать albimusic-bot.service
+1. **Telegram бот** (`albimusic-bot.service`) запускает `main_with_payments.py` — **не** `bot.py`!
+2. **VK бот** (`albimusic-vk-bot.service`) запускает `main_vk.py` через systemd — **НЕ** запускать вручную!
+3. **Веб API** использует **отдельный** venv: `/root/albimusic-bot/web_venv/` (не путать с `/root/albimusic-bot/venv/`)
+4. **Celery** работает двумя сервисами одновременно (`celery-worker` + `albimusic-celery`) — оба нужны
+5. При изменении `main_vk.py` → `systemctl restart albimusic-vk-bot`
+6. При изменении `main_with_payments.py` → `systemctl restart albimusic-bot`
+7. При изменении `celery_tasks.py` → `systemctl restart celery-worker && systemctl restart albimusic-celery`
+8. При изменении `web_api.py` → `systemctl restart albimusic-web`
