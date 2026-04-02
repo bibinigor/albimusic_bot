@@ -706,8 +706,33 @@ class VKBot:
                         text = "Написать свой текст"
                         text_lower = text.lower()
             
+            # ── Получаем состояние ЗАРАНЕЕ, чтобы защитить свободный текст от перехвата меню ──
+            try:
+                vk_state = asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.get_state(user_id)
+                )
+            except Exception as _se:
+                logger.error(f"❌ Ошибка получения состояния пользователя {user_id}: {_se}")
+                self.reset_state(user_id)
+                vk_state = States.START
+
+            # Состояния, в которых пользователь вводит произвольный текст (лирику, идею и т.п.)
+            # В этих состояниях НЕЛЬЗЯ применять substring-поиск по ключевым словам меню:
+            # например, слово «поддержка» в тексте песни иначе запускало бы обработчик поддержки.
+            _TEXT_INPUT_STATES = {
+                States.WAITING_SONG_IDEA,
+                States.WAITING_OWN_LYRICS,
+                States.WAITING_CUSTOM_GENRE,
+                States.WAITING_BROADCAST_TEXT,
+            }
+            # payload означает нажатие кнопки — там текст заранее нормализован, substring-поиск безопасен
+            _in_text_input_state = vk_state in _TEXT_INPUT_STATES and not payload
+
             # Обработка команд меню по тексту
-            if "создать песню" in text_lower or text == "🎵 Создать песню":
+            # ТРЮК: если пользователь в режиме ввода текста → берём ветку pass и ВСЕ elif ниже пропускаются.
+            if _in_text_input_state:
+                pass  # свободный текст — пропускаем меню, идём к обработке состояний
+            elif "создать песню" in text_lower or text == "🎵 Создать песню":
                 logger.info(f"🎵 Запрос на создание песни от пользователя {user_id}")
                 try:
                     result = execute_query_sync(
@@ -989,17 +1014,8 @@ class VKBot:
                 command_handled = True
                 return
 
-            # Получаем состояние из нового менеджера состояний
-            try:
-                vk_state = asyncio.get_event_loop().run_until_complete(
-                    self.state_manager.get_state(user_id)
-                )
-            except Exception as e:
-                logger.error(f"❌ Ошибка получения состояния пользователя {user_id}: {e}")
-                # Сбрасываем состояние при ошибке
-                self.reset_state(user_id)
-                vk_state = States.START
-            
+            # vk_state уже получен выше (до блока проверок команд меню)
+
             # ──── ОБРАБОТКА СОСТОЯНИЙ РАССЫЛКИ (ADMIN) ────
             if vk_state == States.WAITING_BROADCAST_TEXT:
                 if text_lower in ['отмена', 'cancel']:
