@@ -31,7 +31,7 @@ from celery_tasks import (
 
 # Импортируем модуль администрирования (рассылка)
 try:
-    from vk_admin import get_all_user_ids, format_broadcast_confirmation, format_broadcast_result
+    from vk_admin import get_all_user_ids, get_vk_user_ids, format_broadcast_confirmation, format_broadcast_result
     HAS_VK_ADMIN = True
 except ImportError:
     HAS_VK_ADMIN = False
@@ -395,18 +395,89 @@ class VKBot:
             logger.error(f"❌ Ошибка создания клавиатуры: {e}")
             return None
 
-    def register_user(self, user_id, username, first_name):
-        """Register new user in database"""
+    def register_user(self, user_id, username, first_name, referrer_id=None):
+        """Register new user in database. Returns True if user is NEW, False if already existed."""
         try:
             result = execute_query_sync(
-                "INSERT INTO users (user_id, username, first_name, balance, created_at) VALUES (%s, %s, %s, 1, NOW()) ON CONFLICT (user_id) DO NOTHING",
+                "INSERT INTO users (user_id, username, first_name, balance, created_at, provider) VALUES (%s, %s, %s, 1, NOW(), 'vk') ON CONFLICT (user_id) DO UPDATE SET provider = 'vk' WHERE users.provider = 'telegram' RETURNING user_id",
                 (user_id, username, first_name)
             )
-            logger.info(f"✅ Пользователь {user_id} успешно зарегистрирован с 1 токеном")
-            return True
+            is_new_user = bool(result)
+            if is_new_user:
+                logger.info(f"✅ Пользователь {user_id} успешно зарегистрирован с 1 токеном")
+                # Устанавливаем реферальную связь и сразу начисляем бонус пригласившему
+                if referrer_id and int(referrer_id) != int(user_id):
+                    try:
+                        ref_exists = execute_query_sync(
+                            "SELECT user_id FROM users WHERE user_id = %s", (int(referrer_id),)
+                        )
+                        if ref_exists:
+                            execute_query_sync(
+                                "UPDATE users SET invited_by = %s WHERE user_id = %s AND invited_by IS NULL",
+                                (int(referrer_id), user_id)
+                            )
+                            execute_query_sync(
+                                "INSERT INTO referrals (referrer_id, referred_id, bonus_applied) SELECT %s, %s, TRUE WHERE NOT EXISTS (SELECT 1 FROM referrals WHERE referred_id = %s)",
+                                (int(referrer_id), user_id, user_id)
+                            )
+                            # Начисляем 2 токена пригласившему сразу при регистрации нового пользователя
+                            execute_query_sync(
+                                "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
+                                (int(referrer_id),)
+                            )
+                            logger.info(f"🔗 Реферал: {user_id} → {referrer_id}. Начислено +2 токена")
+                            # Уведомляем пригласившего
+                            self.send_message(
+                                user_id=int(referrer_id),
+                                message=(
+                                    "🎉 Ваш друг присоединился к ALBI Music!\n\n"
+                                    "💰 Вам начислено +2 токена за приглашение друга.\n"
+                                    "Продолжайте приглашать — за каждого получаете 2 токена! 🚀"
+                                )
+                            )
+                    except Exception as ref_e:
+                        logger.warning(f"⚠️ Ошибка реферальной системы при регистрации: {ref_e}")
+            else:
+                logger.info(f"📝 Пользователь {user_id} уже был в базе данных")
+            return is_new_user
         except Exception as e:
             logger.error(f"❌ Ошибка регистрации пользователя {user_id}: {e}")
             return False
+
+    def _award_referral_bonus(self, referred_user_id):
+        """Начислить 2 токена пригласившему, если приглашённый впервые создал музыку."""
+        try:
+            ref_row = execute_query_sync(
+                "SELECT referrer_id FROM referrals WHERE referred_id = %s AND bonus_applied = FALSE",
+                (referred_user_id,)
+            )
+            if not ref_row:
+                return  # Нет реферала или бонус уже выплачен
+
+            referrer_id = ref_row[0][0]
+
+            # Начисляем 2 токена рефереру
+            execute_query_sync(
+                "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
+                (referrer_id,)
+            )
+            # Помечаем бонус как выплаченный
+            execute_query_sync(
+                "UPDATE referrals SET bonus_applied = TRUE WHERE referred_id = %s",
+                (referred_user_id,)
+            )
+            # Уведомляем реферера
+            self.send_message(
+                user_id=referrer_id,
+                message=(
+                    "🎉 Ваш друг создал первую песню!\n\n"
+                    "💰 Вам начислено +2 токена за приглашение друга.\n"
+                    "Продолжайте приглашать — за каждого получаете 2 токена! 🚀"
+                )
+            )
+            logger.info(f"💰 Реферальный бонус: +2 токена пользователю {referrer_id} (пригласил {referred_user_id})")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка начисления реферального бонуса для {referred_user_id}: {e}")
 
     def get_admin_stats(self):
         """Получить статистику для админ-панели (аналог Telegram-бота)"""
@@ -614,7 +685,18 @@ class VKBot:
                 logger.info(f"📩 Получен payload от {user_id}: {payload}")
         except Exception as e:
             logger.error(f"❌ Ошибка при разборе payload: {e}")
-        
+
+        # Извлекаем реферальный параметр ref (когда пользователь пришёл по ссылке ?ref=USER_ID)
+        ref_param = None
+        try:
+            if hasattr(event, 'obj') and isinstance(event.obj, dict) and 'message' in event.obj:
+                ref_raw = event.obj['message'].get('ref', None)
+                if ref_raw:
+                    ref_param = int(ref_raw)
+                    logger.info(f"🔗 Пользователь {user_id} пришёл по реферальной ссылке от {ref_param}")
+        except Exception:
+            ref_param = None
+
         try:
             # Флаг для отслеживания обработки команды
             command_handled = False
@@ -627,9 +709,10 @@ class VKBot:
                 registered = self.register_user(
                     user_id=user_id,
                     username=user_info.get('screen_name'),
-                    first_name=user_info.get('first_name')
+                    first_name=user_info.get('first_name'),
+                    referrer_id=ref_param
                 )
-                logger.info(f"📝 Регистрация пользователя: {'успешно' if registered else 'уже был в базе'}")
+                logger.info(f"📝 Регистрация пользователя: {'новый' if registered else 'уже был в базе'}")
             except Exception as e:
                 logger.error(f"❌ Ошибка при работе с пользователем: {e}")
                 return
@@ -1154,13 +1237,24 @@ class VKBot:
                             self.state_manager.set_state(user_id, States.CHOOSING_LYRICS_VARIANT)
                         )
                     else:
-                        # Если не удалось сгенерировать текст
+                        # Если не удалось сгенерировать текст — НЕ сбрасываем состояние,
+                        # оставляем пользователя в WAITING_SONG_IDEA чтобы он мог попробовать снова
+                        asyncio.get_event_loop().run_until_complete(
+                            self.state_manager.set_state(user_id, States.WAITING_SONG_IDEA)
+                        )
                         self.send_message(
                             user_id=user_id,
-                            message="❌ Не удалось сгенерировать тексты. Попробуйте другую идею или свой текст.",
-                            keyboard=self.get_main_keyboard(user_id)
+                            message=(
+                                "❌ Не удалось сгенерировать текст песни.\n\n"
+                                "💡 Попробуйте описать идею подробнее:\n"
+                                "• Напишите 2-3 предложения\n"
+                                "• Укажите настроение (весёлая, грустная, романтичная)\n"
+                                "• Опишите тему или главных героев\n\n"
+                                "Пример: «Весёлая песня про дружбу, как мы с друзьями проводим лето на даче»\n\n"
+                                "✍️ Введите новую идею:"
+                            ),
+                            keyboard=self.get_cancel_keyboard()
                         )
-                        self.reset_state(user_id)
                 except Exception as e:
                     logger.error(f"❌ Ошибка генерации текста: {e}")
                     self.send_message(
@@ -1424,22 +1518,27 @@ class VKBot:
                         self.state_manager.update_data(user_id, genre=text)
                     )
                     
-                    # Переводим в состояние выбора пола вокалиста
-                    asyncio.get_event_loop().run_until_complete(
-                        self.state_manager.set_state(user_id, States.WAITING_VOCAL_GENDER)
-                    )
+                    # Сразу запускаем генерацию (без выбора пола вокалиста)
+                    _sd = asyncio.get_event_loop().run_until_complete(
+                        self.state_manager.get_data(user_id)
+                    ) or {}
+                    _lyrics = _sd.get('lyrics', '')
+                    self.reset_state(user_id)
                     
-                    # Импортируем клавиатуру для выбора пола вокалиста
-                    from vk_keyboards import get_vocal_gender_keyboard
-                    
-                    # Отправляем клавиатуру выбора пола вокалиста
                     self.send_message(
                         user_id=user_id,
-                        message="Выберите пол вокалиста:",
-                        keyboard=get_vocal_gender_keyboard()
+                        message="🎵 Генерация началась!\n\n🤖 Создаю новую песню...\n⏰ Это займет 3-5 минут",
+                        keyboard=self.get_cancel_keyboard()
                     )
                     
-                    logger.info(f"✅ Пользователь {user_id} выбрал жанр: {text}")
+                    import threading as _threading
+                    _threading.Thread(
+                        target=self._launch_song_generation,
+                        args=(user_id, _lyrics, text),
+                        daemon=True
+                    ).start()
+                    
+                    logger.info(f"✅ Пользователь {user_id} выбрал жанр: {text}, генерация запущена")
                     command_handled = True
                     return
                     
@@ -1467,22 +1566,27 @@ class VKBot:
                     self.state_manager.update_data(user_id, genre=text)
                 )
                 
-                # Переводим в состояние выбора пола вокалиста
-                asyncio.get_event_loop().run_until_complete(
-                    self.state_manager.set_state(user_id, States.WAITING_VOCAL_GENDER)
-                )
+                # Сразу запускаем генерацию (без выбора пола вокалиста)
+                _sd = asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.get_data(user_id)
+                ) or {}
+                _lyrics = _sd.get('lyrics', '')
+                self.reset_state(user_id)
                 
-                # Импортируем клавиатуру для выбора пола вокалиста
-                from vk_keyboards import get_vocal_gender_keyboard
-                
-                # Отправляем клавиатуру выбора пола вокалиста
                 self.send_message(
                     user_id=user_id,
-                    message="Выберите пол вокалиста:",
-                    keyboard=get_vocal_gender_keyboard()
+                    message="🎵 Генерация началась!\n\n🤖 Создаю новую песню...\n⏰ Это займет 3-5 минут",
+                    keyboard=self.get_cancel_keyboard()
                 )
                 
-                logger.info(f"✅ Пользователь {user_id} ввел свой жанр: {text}")
+                import threading as _threading
+                _threading.Thread(
+                    target=self._launch_song_generation,
+                    args=(user_id, _lyrics, text),
+                    daemon=True
+                ).start()
+                
+                logger.info(f"✅ Пользователь {user_id} ввел свой жанр: {text}, генерация запущена")
                 command_handled = True
                 return
                 
@@ -1611,18 +1715,9 @@ class VKBot:
                                     if len(audio_urls) > 1:
                                         message_text += f"🎼 Сгенерировано {len(audio_urls)} варианта\n\n"
 
-                                    # Ссылки на HTML5-плеер: открывает страницу на albi-music.ru
-                                    # где <audio controls> стримит MP3 полностью без VK-ограничений
-                                    for _i, _url in enumerate(audio_urls, 1):
-                                        _lbl = f"Вариант {_i}" if len(audio_urls) > 1 else "Слушать"
-                                        _ptitle = _urlparse.quote(f"{_lbl} — ALBI Music", safe='')
-                                        _purl   = _urlparse.quote(_url, safe='')
-                                        _player_link = f"https://albi-music.ru/player?url={_purl}&title={_ptitle}"
-                                        message_text += f"\n🎧 {_lbl}: {_player_link}"
                                 except Exception as json_error:
                                     logger.error(f"❌ Ошибка при парсинге JSON аудио URL: {json_error}")
-                                    _purl_fb = _urlparse.quote(str(audio_url), safe='')
-                                    message_text += f"\n🎧 Слушать: https://albi-music.ru/player?url={_purl_fb}&title=ALBI+Music"
+                                    audio_urls = [str(audio_url)]
 
                                 # Отправляем сообщение с кнопками "Скачать"
                                 from vk_keyboards import get_music_result_keyboard
@@ -1656,7 +1751,7 @@ class VKBot:
                                     (user_id,)
                                 )
                                 logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
-                                
+
                                 # Помечаем в БД как уже доставленное (чтобы Telegram-монитор не отправил дубль)
                                 try:
                                     execute_query_sync(
@@ -1832,8 +1927,7 @@ class VKBot:
                             except Exception:
                                 urls = [str(audio_url)]
 
-                            # Красивое сообщение с кликабельными ссылками на HTML5-плеер
-                            import urllib.parse as _urlparse_im
+                            # Сообщение о готовой инструментальной музыке
                             result_msg = (
                                 f"✅ Ваша инструментальная музыка готова!\n\n"
                                 f"🎵 Жанр: {_genre}\n\n"
@@ -1842,13 +1936,7 @@ class VKBot:
                             if len(urls) > 1:
                                 result_msg += f"🎼 Сгенерировано {len(urls)} варианта\n\n"
 
-                            # Ссылки на HTML5-плеер — трек играет полностью в браузере
-                            for _im_i, _im_url in enumerate(urls, 1):
-                                _im_lbl   = f"Вариант {_im_i}" if len(urls) > 1 else "Слушать"
-                                _im_ptitle = _urlparse_im.quote(f"{_im_lbl} — ALBI Music Instrumental", safe='')
-                                _im_purl   = _urlparse_im.quote(_im_url, safe='')
-                                _im_player = f"https://albi-music.ru/player?url={_im_purl}&title={_im_ptitle}"
-                                result_msg += f"🎧 {_im_lbl}: {_im_player}\n"
+                            result_msg += "🎧 Нажмите «Слушать» чтобы открыть плеер, или «Скачать» для сохранения файла."
 
                             # Отправляем сообщение с кнопками "Скачать"
                             from vk_keyboards import get_music_result_keyboard
@@ -2237,6 +2325,160 @@ class VKBot:
             self.reset_state(user_id)
     
     # ════════════════════════════════════════════════════════════════
+    # ГЕНЕРАЦИЯ ПЕСНИ — вспомогательный метод (запускается в треде)
+    # ════════════════════════════════════════════════════════════════
+
+    def _launch_song_generation(self, user_id, lyrics, genre):
+        """Генерация песни: переводит жанр, вызывает Suno API, отправляет результат.
+        Пол вокала НЕ задаётся принудительно — пользователь может указать его
+        в тексте жанра (например: «рок, женский вокал» или «хор, детские голоса»).
+        Запускается в отдельном потоке."""
+        try:
+            # Переводим жанр на английский для Suno API
+            translated_genre = translate_style_to_english(genre, add_improvements=True)
+            logger.info(f"🔄 Перевод жанра для песни: '{genre}' → '{translated_genre}'")
+
+            # Стиль = жанр без принудительного пола вокала
+            style = translated_genre
+
+            # Включаем customMode для длинных текстов
+            use_custom_mode = len(lyrics) > 500
+            if use_custom_mode:
+                logger.info(f"ℹ️ Автоматически включен customMode из-за длины текста ({len(lyrics)} символов)")
+
+            logger.info(f"🎵 Запуск генерации песни для пользователя {user_id}")
+            logger.info(f"🎵 Текст: {lyrics[:100]}...")
+            logger.info(f"🎵 Стиль: {style}")
+
+            # Пробуем отправить GIF-анимацию (опционально, без блокировки)
+            gif_path = '/root/albimusic-bot/robot_music.gif'
+            try:
+                import os
+                if os.path.exists(gif_path):
+                    from vk_api.upload import VkUpload
+                    upload = VkUpload(self.vk_session)
+                    doc = upload.document_message(gif_path, peer_id=user_id)
+                    attachment = f"doc{doc['doc']['owner_id']}_{doc['doc']['id']}"
+                    try:
+                        self.vk.messages.send(
+                            user_id=user_id,
+                            random_id=get_random_id(),
+                            attachment=attachment
+                        )
+                    except Exception as gif_error:
+                        logger.warning(f"⚠️ Не удалось отправить GIF: {gif_error}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при отправке GIF: {e}")
+
+            # Запускаем генерацию
+            result = generate_suno_music_sync(
+                prompt=lyrics,
+                is_song=True,
+                custom_mode=use_custom_mode,
+                user_id=user_id,
+                style=style
+            )
+
+            if result:
+                if isinstance(result, tuple) and len(result) == 3:
+                    audio_url, suno_task_id, suno_audio_id = result
+                elif isinstance(result, str):
+                    audio_url = result
+                    suno_task_id = None
+                    suno_audio_id = None
+                else:
+                    audio_url = str(result)
+                    suno_task_id = None
+                    suno_audio_id = None
+
+                import uuid
+                db_task_id = str(uuid.uuid4())
+
+                execute_query_sync(
+                    'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (user_id, db_task_id, style, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id, 'completed')
+                )
+
+                from vk_keyboards import get_song_options_keyboard
+                from vk_keyboards import get_music_result_keyboard
+
+                message_text = f"✅ Ваша песня готова!\n\n🎵 Жанр: {genre}\n\n"
+
+                try:
+                    audio_urls = json.loads(audio_url) if isinstance(audio_url, str) and audio_url.startswith('[') else [audio_url]
+                    if len(audio_urls) > 1:
+                        message_text += f"🎼 Сгенерировано {len(audio_urls)} варианта\n\n"
+                except Exception:
+                    audio_urls = [str(audio_url)]
+
+                song_keyboard = get_music_result_keyboard(audio_url)
+                self.send_message(user_id=user_id, message=message_text, keyboard=song_keyboard)
+
+                if suno_task_id:
+                    options_text = (
+                        "💎 Что можно сделать с этой песней:\n\n"
+                        "🎤 Минусовка — версия без вокала\n"
+                        "🎸 Кавер — перепой в другом жанре\n"
+                        "🎵 В WAV — конвертация в WAV формат\n"
+                        "🔗 Поделиться — опубликовать трек"
+                    )
+                    self.send_message(
+                        user_id=user_id,
+                        message=options_text,
+                        keyboard=get_song_options_keyboard(db_task_id)
+                    )
+
+                execute_query_sync(
+                    "UPDATE users SET balance = balance - 1 WHERE user_id = %s",
+                    (user_id,)
+                )
+                logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
+
+                try:
+                    execute_query_sync(
+                        "UPDATE generations SET audio_url = %s WHERE task_id = %s",
+                        (f"ALREADY_SENT_{audio_url}", db_task_id)
+                    )
+                except Exception as mark_err:
+                    logger.warning(f"⚠️ Не удалось пометить генерацию как отправленную: {mark_err}")
+
+                try:
+                    bal_result = execute_query_sync(
+                        "SELECT balance FROM users WHERE user_id = %s", (user_id,)
+                    )
+                    new_balance = bal_result[0][0] if bal_result and bal_result[0] else 0
+                    if new_balance <= 0:
+                        from vk_keyboards import get_balance_actions_keyboard
+                        buy_kb = get_balance_actions_keyboard()
+                        self.send_message(
+                            user_id=user_id,
+                            message=(
+                                "🔔 Ваш токен использован!\n\n"
+                                "Чтобы создать ещё песни:\n"
+                                "💰 Купите токены — нажмите кнопку «Баланс»\n"
+                                "🤝 Пригласите друга — получите 2 токена бесплатно!\n\n"
+                                f"🔗 Ваша реферальная ссылка:\nhttps://vk.me/albi_music?ref={user_id}"
+                            ),
+                            keyboard=buy_kb
+                        )
+                except Exception as bal_err:
+                    logger.warning(f"⚠️ Ошибка проверки баланса после генерации: {bal_err}")
+            else:
+                self.send_message(
+                    user_id=user_id,
+                    message="❌ Не удалось сгенерировать песню. Попробуйте другой жанр или позже.",
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка генерации песни: {e}")
+            logger.error(traceback.format_exc())
+            self.send_message(
+                user_id=user_id,
+                message="❌ Произошла ошибка при генерации песни. Попробуйте позже.",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+
+    # ════════════════════════════════════════════════════════════════
     # РАССЫЛКА — методы
     # ════════════════════════════════════════════════════════════════
 
@@ -2259,7 +2501,7 @@ class VKBot:
             asyncio.get_event_loop().run_until_complete(self.state_manager.finish(user_id))
             return
 
-        total_users = len(get_all_user_ids())
+        total_users = len(get_vk_user_ids()) if HAS_VK_ADMIN else 0
         confirmation_text = format_broadcast_confirmation(text, total_users)
 
         # Сохраняем текст в данных состояния
@@ -2310,12 +2552,12 @@ class VKBot:
         # Сбрасываем состояние ДО рассылки
         asyncio.get_event_loop().run_until_complete(self.state_manager.finish(user_id))
 
-        user_ids = get_all_user_ids()
+        user_ids = get_vk_user_ids()
 
         self.send_message(
             user_id,
             f"🚀 **Рассылка запущена!**\n\n"
-            f"📨 Начинаю отправку {len(user_ids)} пользователям...\n"
+            f"📨 Начинаю отправку {len(user_ids)} VK-пользователям...\n"
             f"⏳ Пришлю итог когда закончу."
         )
 
@@ -2903,6 +3145,13 @@ class VKBot:
                         message="❌ Произошла ошибка. Попробуйте позже.",
                         keyboard=self.get_main_keyboard(user_id)
                     )
+
+            # Кнопка "Слушать" теперь openlink (open_link), callback сюда не придёт.
+            # Оставляем блок для обратной совместимости (на случай старых клавиатур в истории чата).
+            elif action == "listen":
+                cdn_url = payload.get('url', '')
+                logger.info(f"[listen-legacy] получен старый callback от {user_id}, url={cdn_url[:60] if cdn_url else 'empty'}")
+                # Ничего не отправляем в чат — новые кнопки openlink, старый callback игнорируем
 
             # Отправляем ответ на событие (обязательно для callback-кнопок)
             try:
