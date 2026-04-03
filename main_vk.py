@@ -406,37 +406,50 @@ class VKBot:
             if is_new_user:
                 logger.info(f"✅ Пользователь {user_id} успешно зарегистрирован с 1 токеном")
                 # Устанавливаем реферальную связь и сразу начисляем бонус пригласившему
+                # ВАЖНО: реферер должен быть VK-пользователем (provider='vk')
                 if referrer_id and int(referrer_id) != int(user_id):
                     try:
                         ref_exists = execute_query_sync(
-                            "SELECT user_id FROM users WHERE user_id = %s", (int(referrer_id),)
+                            "SELECT user_id FROM users WHERE user_id = %s AND provider = 'vk'",
+                            (int(referrer_id),)
                         )
                         if ref_exists:
                             execute_query_sync(
                                 "UPDATE users SET invited_by = %s WHERE user_id = %s AND invited_by IS NULL",
                                 (int(referrer_id), user_id)
                             )
+                            # Создаём запись в referrals (bonus_applied=FALSE — до реального начисления)
                             execute_query_sync(
-                                "INSERT INTO referrals (referrer_id, referred_id, bonus_applied) SELECT %s, %s, TRUE WHERE NOT EXISTS (SELECT 1 FROM referrals WHERE referred_id = %s)",
+                                "INSERT INTO referrals (referrer_id, referred_id, bonus_applied) SELECT %s, %s, FALSE WHERE NOT EXISTS (SELECT 1 FROM referrals WHERE referred_id = %s)",
                                 (int(referrer_id), user_id, user_id)
                             )
-                            # Начисляем 2 токена пригласившему сразу при регистрации нового пользователя
-                            execute_query_sync(
-                                "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
+                            # Начисляем 2 токена VK-рефереру
+                            rows_updated = execute_query_sync(
+                                "UPDATE users SET balance = balance + 2 WHERE user_id = %s AND provider = 'vk'",
                                 (int(referrer_id),)
                             )
-                            logger.info(f"🔗 Реферал: {user_id} → {referrer_id}. Начислено +2 токена")
-                            # Уведомляем пригласившего
-                            self.send_message(
-                                user_id=int(referrer_id),
-                                message=(
-                                    "🎉 Ваш друг присоединился к ALBI Music!\n\n"
-                                    "💰 Вам начислено +2 токена за приглашение друга.\n"
-                                    "Продолжайте приглашать — за каждого получаете 2 токена! 🚀"
+                            if rows_updated and rows_updated > 0:
+                                # Помечаем бонус как выплаченный ТОЛЬКО если UPDATE прошёл успешно
+                                execute_query_sync(
+                                    "UPDATE referrals SET bonus_applied = TRUE WHERE referred_id = %s",
+                                    (user_id,)
                                 )
-                            )
+                                logger.info(f"🔗 Реферал VK: {user_id} → {referrer_id}. +2 токена начислено VK-рефереру, bonus_applied=TRUE")
+                                # Уведомляем пригласившего через VK
+                                self.send_message(
+                                    user_id=int(referrer_id),
+                                    message=(
+                                        "🎉 Ваш друг присоединился к ALBI Music!\n\n"
+                                        "💰 Вам начислено +2 токена за приглашение друга.\n"
+                                        "Продолжайте приглашать — за каждого получаете 2 токена! 🚀"
+                                    )
+                                )
+                            else:
+                                logger.warning(f"⚠️ Реферал VK: UPDATE баланса VK-реферера {referrer_id} затронул 0 строк!")
+                        else:
+                            logger.warning(f"⚠️ Реферал VK: реферер {referrer_id} не найден как VK-пользователь — бонус пропущен.")
                     except Exception as ref_e:
-                        logger.warning(f"⚠️ Ошибка реферальной системы при регистрации: {ref_e}")
+                        logger.warning(f"⚠️ Ошибка реферальной системы VK при регистрации: {ref_e}", exc_info=True)
             else:
                 logger.info(f"📝 Пользователь {user_id} уже был в базе данных")
             return is_new_user
@@ -643,12 +656,39 @@ class VKBot:
         logger.info(f"📩 Получено новое сообщение от {user_id}: '{text}' (в нижнем регистре: '{text_lower}')")
         print(f"Получено сообщение: {text}")
         
-        # Специальная обработка команды "Начать" до всего остального
+        # Специальная обработка команды "Начать"/"start"
+        # ВАЖНО: сначала регистрируем пользователя с ref_param, потом отправляем приветствие
         if text_lower in ["начать", "start"]:
             logger.info(f"🔄 Получена команда начала работы от {user_id}: '{text}'")
-            # Принудительно сбрасываем состояние
+
+            # 1. Извлекаем реферальный параметр (VK передаёт ref ТОЛЬКО в первом сообщении)
+            ref_param_start = None
+            try:
+                if hasattr(event, 'obj') and isinstance(event.obj, dict) and 'message' in event.obj:
+                    ref_raw = event.obj['message'].get('ref', None)
+                    if ref_raw:
+                        ref_param_start = int(ref_raw)
+                        logger.info(f"🔗 Новый пользователь {user_id} пришёл по реферальной ссылке от {ref_param_start}")
+            except Exception:
+                ref_param_start = None
+
+            # 2. Регистрируем пользователя (с реферальным бонусом если есть ref)
+            try:
+                user_info_start = self.vk.users.get(user_ids=user_id)[0]
+                logger.info(f"👤 Получена информация о пользователе: {user_info_start}")
+                registered_start = self.register_user(
+                    user_id=user_id,
+                    username=user_info_start.get('screen_name'),
+                    first_name=user_info_start.get('first_name'),
+                    referrer_id=ref_param_start
+                )
+                logger.info(f"📝 Регистрация при 'начать': {'новый' if registered_start else 'уже был в базе'}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка регистрации при команде 'начать' для {user_id}: {e}")
+
+            # 3. Сбрасываем состояние
             self.reset_state(user_id)
-            
+
             welcome_text = """🎵 Привет! Я — бот для создания музыки с помощью ИИ.
 
 🎼 Что я умею:
@@ -658,7 +698,7 @@ class VKBot:
 
 💫 Первая генерация — бесплатно!
 🎁 Выберите действие в меню 👇"""
-            
+
             keyboard = self.get_main_keyboard(user_id)
             if keyboard:
                 result = self.send_message(
