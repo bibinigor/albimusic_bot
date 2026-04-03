@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ALBI Music - Веб-приложение</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0c0b20 0%, #1a1446 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            padding-bottom: 80px;
+        }
+
+        /* Header */
+        .header {
+            background: rgba(12, 11, 32, 0.95);
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .balance {
+            background: rgba(102, 126, 234, 0.2);
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+        }
+
+        /* Main Container */
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Screens */
+        .screen {
+            display: none;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .screen.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Welcome Screen */
+        .welcome {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .welcome h1 {
+            font-size: 32px;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .welcome-text {
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 30px;
+            color: rgba(255, 255, 255, 0.8);
+        }
+
+        .occasions {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 30px;
+            text-align: left;
+        }
+
+        .occasion {
+            background: rgba(102, 126, 234, 0.05);
+            padding: 12px;
+            border-radius: 12px;
+            font-size: 14px;
+            border: 1px dashed rgba(102, 126, 234, 0.3);
+            cursor: default;
+            opacity: 0.8;
+        }
+
+        /* Buttons */
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 10px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-secondary {
+            background: rgba(102, 126, 234, 0.2);
+            box-shadow: none;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-small {
+            padding: 10px 20px;
+            font-size: 14px;
+        }
+
+        .btn-icon {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Genre Grid */
+        .genre-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .genre-btn {
+            background: rgba(102, 126, 234, 0.1);
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            padding: 15px;
+            border-radius: 12px;
+            font-size: 15px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .genre-btn:hover {
+            background: rgba(102, 126, 234, 0.2);
+            border-color: rgba(102, 126, 234, 0.5);
+        }
+
+        /* Input */
+        .input, .textarea {
+            width: 100%;
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            background: rgba(12, 11, 32, 0.5);
+            color: white;
+            font-size: 16px;
+            margin-bottom: 15px;
+            font-family: inherit;
+        }
+
+        .textarea {
+            min-height: 150px;
+            resize: vertical;
+        }
+
+        .input::placeholder, .textarea::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        /* Track List */
+        .track-item {
+            background: rgba(102, 126, 234, 0.1);
+            border: 1px solid rgba(102, 126, 234, 0.2);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+
+        .track-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .track-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.9);
+        }
+
+        .track-date {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .track-prompt {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 10px;
+        }
+
+        .track-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        /* Audio Player */
+        .audio-player {
+            background: rgba(12, 11, 32, 0.7);
+            padding: 15px;
+            border-radius: 12px;
+            margin-bottom: 15px;
+        }
+
+        audio {
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .spinner {
+            border: 3px solid rgba(102, 126, 234, 0.3);
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Bottom Navigation */
+        .bottom-nav {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(12, 11, 32, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 10px 0;
+            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.3);
+            z-index: 100;
+        }
+
+        .nav-container {
+            max-width: 600px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-around;
+        }
+
+        .nav-btn {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+            padding: 8px;
+            background: none;
+            border: none;
+            color: rgba(255, 255, 255, 0.6);
+            cursor: pointer;
+            transition: color 0.2s;
+            font-size: 12px;
+        }
+
+        .nav-btn.active {
+            color: #667eea;
+        }
+
+        .nav-icon {
+            font-size: 24px;
+        }
+
+        /* Pricing Cards */
+        .pricing-grid {
+            display: grid;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .pricing-card {
+            background: rgba(102, 126, 234, 0.1);
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .pricing-card:hover {
+            background: rgba(102, 126, 234, 0.15);
+            border-color: rgba(102, 126, 234, 0.5);
+        }
+
+        .pricing-card.popular::before {
+            content: '🔥 ПОПУЛЯРНО';
+            position: absolute;
+            top: 10px;
+            right: -30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 5px 40px;
+            transform: rotate(45deg);
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .pricing-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .pricing-price {
+            font-size: 24px;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .pricing-desc {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        /* Alert */
+        .alert {
+            padding: 15px;
+            border-radius: 12px;
+            margin-bottom: 15px;
+            border: 1px solid;
+        }
+
+        .alert-error {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #fca5a5;
+        }
+
+        .alert-success {
+            background: rgba(34, 197, 94, 0.1);
+            border-color: rgba(34, 197, 94, 0.3);
+            color: #86efac;
+        }
+
+        .alert-info {
+            background: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.3);
+            color: #93c5fd;
+        }
+
+        /* Login Screen */
+        .login-screen {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .auth-container {
+            max-width: 400px;
+            width: 100%;
+        }
+
+        .auth-title {
+            font-size: 32px;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .auth-subtitle {
+            font-size: 16px;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 40px;
+        }
+
+        .auth-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        #vk-auth-container {
+            min-height: 50px;
+            margin-bottom: 10px;
+        }
+
+        /* Hide scrollbar but keep functionality */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(12, 11, 32, 0.3);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(102, 126, 234, 0.3);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(102, 126, 234, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="loginScreen" class="login-screen">
+        <div class="auth-container">
+            <h1 class="auth-title">ALBI Music</h1>
+            <p class="auth-subtitle">Твой личный AI-композитор на основе SUNO</p>
+
+            <!-- Преимущества -->
+            <div style="background: rgba(102, 126, 234, 0.1); border: 1px solid rgba(102, 126, 234, 0.3); border-radius: 12px; padding: 20px; margin: 30px 0; text-align: left;">
+                <div style="margin-bottom: 15px;">✨ <strong>Создавай уникальные песни</strong> с текстом или без</div>
+                <div style="margin-bottom: 15px;">🎵 <strong>16 жанров музыки</strong> от рока до классики</div>
+                <div style="margin-bottom: 15px;">⚡ <strong>Результат за 3 минуты</strong> - 2 версии по 45 сек</div>
+                <div>🎁 <strong>Первая генерация БЕСПЛАТНО!</strong></div>
+            </div>
+
+            <!-- Призыв к действию -->
+            <div style="margin-bottom: 25px;">
+                <h3 style="margin-bottom: 10px; font-size: 18px;">🚀 Начни создавать музыку прямо сейчас!</h3>
+                <p style="color: rgba(255, 255, 255, 0.7); font-size: 14px;">
+                    Авторизуйся любым удобным способом ниже:
+                </p>
+            </div>
+
+            <div id="authError" class="alert alert-error" style="display: none;"></div>
+
+            <div class="auth-buttons">
+                <!-- VK ID виджет -->
+                <div id="vk-auth-container"></div>
+
+                <!-- Яндекс -->
+                <button class="btn" onclick="authWithYandex()">
+                    <span class="btn-icon">🟡 Войти через Яндекс</span>
+                </button>
+
+                <!-- Гостевой режим для тестирования -->
+                <button class="btn btn-secondary" onclick="authAsGuest()">
+                    <span class="btn-icon">👤 Войти как гость (тест)</span>
+                </button>
+                <p style="font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 10px;">
+                    Режим гостя - для тестирования интерфейса без реальной генерации
+                </p>
+            </div>
+
+            <!-- Безопасность -->
+            <p style="margin-top: 30px; font-size: 12px; color: rgba(255, 255, 255, 0.5);">
+                🔒 Безопасная авторизация через проверенные сервисы<br>
+                Мы не храним пароли и не получаем доступ к личным данным
+            </p>
+        </div>
+    </div>
+
+    <!-- Main App -->
+    <div id="mainApp" style="display: none;">
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">ALBI Music</div>
+            <div class="balance" id="userBalance">💰 0 генераций</div>
+        </div>
+
+        <!-- Container -->
+        <div class="container">
+            <!-- Welcome Screen -->
+            <div id="welcomeScreen" class="screen active">
+                <div class="welcome">
+                    <h1>🎵 Какую песню создадим?</h1>
+                    <div class="occasions">
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">🎂 День рождения друга</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">💖 Признание в любви</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">🎉 Праздник или вечеринка</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">😂 Прикол или розыгрыш</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">🏆 Поздравление с победой</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">📱 Трек для Reels/TikTok</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">💪 Для тренировок</div>
+                        <div class="occasion" style="cursor: default; opacity: 0.9;">🧘 Для медитации</div>
+                    </div>
+                    <p style="font-size: 14px; color: rgba(255, 255, 255, 0.6); margin-bottom: 20px;">
+                        ☝️ Примеры идей для твоих песен
+                    </p>
+                    <p class="welcome-text">
+                        Опиши идею, выбери жанр — через 2 минуты получишь 2 ДЕМО-версии песни <strong>БЕСПЛАТНО!</strong>
+                    </p>
+                    <button class="btn" onclick="showScreen('createSongTypeScreen')">
+                        🎵 Создать песню
+                    </button>
+                    <button class="btn btn-secondary" onclick="showScreen('createMusicScreen')">
+                        🎶 Создать музыку
+                    </button>
+                </div>
+            </div>
+
+            <!-- Create Song: Choose Text Type -->
+            <div id="createSongTypeScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">🎵 СОЗДАЕМ ПЕСНЮ</h2>
+                <p style="margin-bottom: 20px; color: rgba(255, 255, 255, 0.7);">
+                    Если у тебя есть стихи, жми «У меня свой текст».<br>
+                    Если стихов нет, давай Я придумаю тебе текст!
+                </p>
+                <button class="btn" onclick="showScreen('aiTextScreen')">
+                    ✨ ПРИДУМАТЬ ТЕКСТ
+                </button>
+                <button class="btn btn-secondary" onclick="showScreen('ownTextScreen')">
+                    📝 У МЕНЯ СВОЙ ТЕКСТ
+                </button>
+                <button class="btn btn-secondary btn-small" onclick="showScreen('welcomeScreen')">
+                    ← Назад
+                </button>
+            </div>
+
+            <!-- AI Text Screen -->
+            <div id="aiTextScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">✨ СОЧИНИМ ТЕКСТ!</h2>
+                <p style="margin-bottom: 20px; color: rgba(255, 255, 255, 0.7);">
+                    Про что и для кого ты хочешь песню? Напиши мне:<br><br>
+                    ▪️ для кого / о ком<br>
+                    ▪️ какие интересные моменты упомянуть<br>
+                    ▪️ идея которую хочется передать песней
+                </p>
+                <textarea
+                    id="songIdea"
+                    class="textarea"
+                    placeholder="Например: Песня для друга на день рождения, он любит футбол и пиццу..."
+                    maxlength="200"
+                ></textarea>
+                <div style="text-align: right; color: rgba(255, 255, 255, 0.5); font-size: 12px; margin-bottom: 15px;">
+                    <span id="ideaCounter">0</span>/200
+                </div>
+                <button class="btn" onclick="generateAILyrics()">
+                    🚀 Создать текст
+                </button>
+                <button class="btn btn-secondary btn-small" onclick="showScreen('createSongTypeScreen')">
+                    ← Назад
+                </button>
+            </div>
+
+            <!-- Own Text Screen -->
+            <div id="ownTextScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">📝 ТВОЙ ТЕКСТ</h2>
+                <p style="margin-bottom: 20px; color: rgba(255, 255, 255, 0.7);">
+                    Отправь мне текст своей песни, и мы перейдем к выбору жанра 🎵
+                </p>
+                <textarea
+                    id="ownLyrics"
+                    class="textarea"
+                    placeholder="Введи текст песни..."
+                    maxlength="3000"
+                ></textarea>
+                <div style="text-align: right; color: rgba(255, 255, 255, 0.5); font-size: 12px; margin-bottom: 15px;">
+                    <span id="lyricsCounter">0</span>/3000
+                </div>
+                <button class="btn" onclick="continueWithOwnLyrics()">
+                    🎵 Продолжить
+                </button>
+                <button class="btn btn-secondary btn-small" onclick="showScreen('createSongTypeScreen')">
+                    ← Назад
+                </button>
+            </div>
+
+            <!-- Generated Lyrics Review -->
+            <div id="lyricsReviewScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">✨ ГОТОВО! ВОТ ТВОЙ ТЕКСТ:</h2>
+                <div id="generatedLyrics" style="background: rgba(102, 126, 234, 0.1); padding: 20px; border-radius: 12px; margin-bottom: 20px; white-space: pre-wrap; line-height: 1.6;"></div>
+                <button class="btn" onclick="showScreen('genreSelectionScreen')">
+                    🎵 Выбрать жанр
+                </button>
+                <button class="btn btn-secondary btn-small" onclick="showScreen('aiTextScreen')">
+                    🔄 Другой текст
+                </button>
+            </div>
+
+            <!-- Genre Selection -->
+            <div id="genreSelectionScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">🎵 ВЫБЕРИ ЖАНР</h2>
+                <div class="genre-grid">
+                    <button class="genre-btn" onclick="selectGenre('pop', '🎤 Поп')">🎤 Поп</button>
+                    <button class="genre-btn" onclick="selectGenre('rock', '🎸 Рок')">🎸 Рок</button>
+                    <button class="genre-btn" onclick="selectGenre('jazz', '🎺 Джаз')">🎺 Джаз</button>
+                    <button class="genre-btn" onclick="selectGenre('blues', '🎵 Блюз')">🎵 Блюз</button>
+                    <button class="genre-btn" onclick="selectGenre('hiphop', '🎧 Хип-хоп')">🎧 Хип-хоп</button>
+                    <button class="genre-btn" onclick="selectGenre('electronic', '⚡ Электронная')">⚡ Электронная</button>
+                    <button class="genre-btn" onclick="selectGenre('classical', '🎻 Классическая')">🎻 Классическая</button>
+                    <button class="genre-btn" onclick="selectGenre('rnb', '💿 R&B/Соул')">💿 R&B/Соул</button>
+                    <button class="genre-btn" onclick="selectGenre('reggae', '🌴 Регги')">🌴 Регги</button>
+                    <button class="genre-btn" onclick="selectGenre('country', '🤠 Кантри')">🤠 Кантри</button>
+                    <button class="genre-btn" onclick="selectGenre('metal', '🤘 Метал')">🤘 Метал</button>
+                    <button class="genre-btn" onclick="selectGenre('folk', '🪕 Фолк')">🪕 Фолк</button>
+                    <button class="genre-btn" onclick="selectGenre('latin', '💃 Латины')">💃 Латины</button>
+                    <button class="genre-btn" onclick="selectGenre('punk', '🎭 Панк')">🎭 Панк</button>
+                    <button class="genre-btn" onclick="selectGenre('funk', '🕺 Фанк')">🕺 Фанк</button>
+                    <button class="genre-btn" onclick="selectGenre('shanson', '🎙️ Шансон')">🎙️ Шансон</button>
+                </div>
+                <button class="btn btn-secondary btn-small" onclick="showCustomGenreInput()">
+                    ✏️ Свой вариант
+                </button>
+                <button class="btn btn-secondary btn-small" onclick="goBackFromGenre()">
+                    ← Назад
+                </button>
+            </div>
+
+            <!-- Create Music Screen -->
+            <div id="createMusicScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">🎶 ИНСТРУМЕНТАЛЬНАЯ МУЗЫКА</h2>
+                <p style="margin-bottom: 20px; color: rgba(255, 255, 255, 0.7);">
+                    🎹 Музыка БЕЗ слов - только мелодия и ритм!<br><br>
+                    Выбери жанр для твоей композиции 👇
+                </p>
+                <div class="genre-grid">
+                    <button class="genre-btn" onclick="selectMusicGenre('pop', '🎤 Поп')">🎤 Поп</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('rock', '🎸 Рок')">🎸 Рок</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('jazz', '🎺 Джаз')">🎺 Джаз</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('blues', '🎵 Блюз')">🎵 Блюз</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('hiphop', '🎧 Хип-хоп')">🎧 Хип-хоп</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('electronic', '⚡ Электронная')">⚡ Электронная</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('classical', '🎻 Классическая')">🎻 Классическая</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('rnb', '💿 R&B/Соул')">💿 R&B/Соул</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('reggae', '🌴 Регги')">🌴 Регги</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('country', '🤠 Кантри')">🤠 Кантри</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('metal', '🤘 Метал')">🤘 Метал</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('folk', '🪕 Фолк')">🪕 Фолк</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('latin', '💃 Латины')">💃 Латины</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('punk', '🎭 Панк')">🎭 Панк</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('funk', '🕺 Фанк')">🕺 Фанк</button>
+                    <button class="genre-btn" onclick="selectMusicGenre('shanson', '🎙️ Шансон')">🎙️ Шансон</button>
+                </div>
+                <button class="btn btn-secondary btn-small" onclick="showCustomMusicGenreInput()">
+                    ✏️ Свой вариант
+                </button>
+                <button class="btn btn-secondary btn-small" onclick="showScreen('welcomeScreen')">
+                    ← Назад
+                </button>
+            </div>
+
+            <!-- My Tracks Screen -->
+            <div id="myTracksScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">📂 МОИ ТРЕКИ</h2>
+                <div id="tracksList"></div>
+            </div>
+
+            <!-- Balance Screen -->
+            <div id="balanceScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">💰 БАЛАНС</h2>
+                <div id="balanceInfo" class="alert alert-info" style="margin-bottom: 20px;"></div>
+
+                <h3 style="margin-bottom: 15px;">💳 Пополнить баланс:</h3>
+                <div class="pricing-grid">
+                    <div class="pricing-card" onclick="buyPackage(490, 10)">
+                        <div class="pricing-title">💳 Стартовый</div>
+                        <div class="pricing-price">490₽</div>
+                        <div class="pricing-desc">10 генераций (20 треков)</div>
+                    </div>
+                    <div class="pricing-card popular" onclick="buyPackage(990, 25)">
+                        <div class="pricing-title">🔥 Популярный</div>
+                        <div class="pricing-price">990₽</div>
+                        <div class="pricing-desc">25 генераций (50 треков)</div>
+                    </div>
+                    <div class="pricing-card" onclick="buyPackage(1990, 60)">
+                        <div class="pricing-title">⭐ Продвинутый</div>
+                        <div class="pricing-price">1990₽</div>
+                        <div class="pricing-desc">60 генераций (120 треков)</div>
+                    </div>
+                    <div class="pricing-card" onclick="buyPackage(3990, 140)">
+                        <div class="pricing-title">💎 Максимум</div>
+                        <div class="pricing-price">3990₽</div>
+                        <div class="pricing-desc">140 генераций (280 треков)</div>
+                    </div>
+                </div>
+
+                <h3 style="margin-top: 30px; margin-bottom: 15px;">🌟 Реферальная программа</h3>
+                <div class="alert alert-info">
+                    <p style="margin-bottom: 10px;">Пригласи друга и получи 2 генерации (4 трека)!</p>
+                    <div style="background: rgba(12, 11, 32, 0.5); padding: 10px; border-radius: 8px; margin-top: 10px; word-break: break-all;">
+                        <span id="referralLink"></span>
+                    </div>
+                    <button class="btn btn-small" style="margin-top: 10px;" onclick="copyReferralLink()">
+                        📋 Копировать ссылку
+                    </button>
+                </div>
+            </div>
+
+            <!-- Examples Screen -->
+            <div id="examplesScreen" class="screen">
+                <h2 style="margin-bottom: 20px;">🎧 ПРИМЕРЫ И ОБУЧЕНИЕ</h2>
+                <div class="alert alert-info">
+                    <p style="margin-bottom: 15px;">
+                        🔐 Это портал для перехода в наш секретный канал<br><br>
+                        <strong>«ALBImusic/ Музыка/ Промпты/ Новости/ Обучение»</strong><br><br>
+                        Там твое вдохновение! Там твоё секретное оружие - идеи! И там же обучение и новости!
+                    </p>
+                    <button class="btn" onclick="window.open('https://t.me/ALBImusic_chart', '_blank')">
+                        🔐 Перейти в секретный канал
+                    </button>
+                </div>
+            </div>
+
+            <!-- Payment Screen (НОВЫЙ) -->
+            <div id="paymentScreen" class="screen">
+                <h2 style="text-align: center; margin-bottom: 20px;">💳 Покупка токенов</h2>
+                <div id="pricingPlans"></div>
+                <p style="text-align: center; margin-top: 20px; font-size: 14px; opacity: 0.7;">
+                    Оплата через ЮKassa (карты, СБП, кошельки)
+                </p>
+            </div>
+
+            <!-- Referral Screen (НОВЫЙ) -->
+            <div id="referralScreen" class="screen">
+                <h2 style="text-align: center; margin-bottom: 20px;">🎁 Реферальная программа</h2>
+                
+                <div style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 15px; margin-bottom: 20px;">
+                    <h3 style="margin-bottom: 10px;">Награды:</h3>
+                    <ul style="line-height: 2; padding-left: 20px;">
+                        <li>🎵 <strong>+2 токена</strong> за каждого друга</li>
+                        <li>🎁 <strong>+5 токенов</strong> бонус за 5-го</li>
+                    </ul>
+                </div>
+                
+                <div style="background: rgba(102, 126, 234, 0.1); padding: 20px; border-radius: 15px; margin-bottom: 20px;">
+                    <h3 style="margin-bottom: 10px;">Ваша ссылка:</h3>
+                    <div style="display: flex; gap: 10px;">
+                        <input id="referralLinkInput" type="text" readonly
+                               style="flex: 1; padding: 10px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; color: white; font-size: 12px;">
+                        <button onclick="copyReferralLinkNew()" class="btn btn-small" style="width: auto; margin: 0;">📋</button>
+                    </div>
+                    <button onclick="shareReferralLink()" class="btn" style="margin-top: 10px;">
+                        📤 Поделиться
+                    </button>
+                </div>
+                
+                <div style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 15px;">
+                    <h3 style="margin-bottom: 15px;">Статистика:</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: center;">
+                        <div style="background: rgba(102,126,234,0.1); padding: 20px; border-radius: 12px;">
+                            <div style="font-size: 32px; font-weight: bold; color: #667eea;" id="referralCount">0</div>
+                            <div style="opacity: 0.7; font-size: 14px;">Друзей</div>
+                        </div>
+                        <div style="background: rgba(102,126,234,0.1); padding: 20px; border-radius: 12px;">
+                            <div style="font-size: 32px; font-weight: bold; color: #f093fb;" id="referralEarned">0</div>
+                            <div style="opacity: 0.7; font-size: 14px;">Заработано</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading Screen -->
+            <div id="loadingScreen" class="screen">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <h3 id="loadingText">Генерируем вашу композицию...</h3>
+                    <p style="color: rgba(255, 255, 255, 0.6); margin-top: 10px;">
+                        ⏰ Это займет 3-5 минут
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom Navigation -->
+        <div class="bottom-nav">
+            <div class="nav-container">
+                <button class="nav-btn active" onclick="navigateTo('welcomeScreen')">
+                    <div class="nav-icon">🏠</div>
+                    <div>Главная</div>
+                </button>
+                <button class="nav-btn" onclick="navigateTo('myTracksScreen'); loadMyTracks();">
+                    <div class="nav-icon">📂</div>
+                    <div>Треки</div>
+                </button>
+                <button class="nav-btn" onclick="navigateTo('paymentScreen'); loadPricing();">
+                    <div class="nav-icon">💳</div>
+                    <div>Купить</div>
+                </button>
+                <button class="nav-btn" onclick="navigateTo('referralScreen'); loadReferralInfo();">
+                    <div class="nav-icon">🎁</div>
+                    <div>Рефералы</div>
+                </button>
+                <button class="nav-btn" onclick="navigateTo('examplesScreen')">
+                    <div class="nav-icon">🎧</div>
+                    <div>Примеры</div>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- VK ID SDK -->
+    <script src="https://unpkg.com/@vkid/sdk@<3.0.0/dist-sdk/umd/index.js"></script>
+    <!-- Axios -->
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
+    <script>
+        const API_BASE = 'https://albi-music.ru/api';
+        let authToken = null;
+        let currentUser = null;
+        let sessionData = {
+            lyrics: null,
+            genre: null,
+            isAIText: false,
+            isMusic: false
+        };
+
+        // ========== NOTIFICATION SYSTEM ==========
+        function showNotification(message, type = 'info') {
+            alert(message); // Простая версия для совместимости
+        }
+
+        // Check if user is already logged in
+        window.addEventListener('DOMContentLoaded', () => {
+            // Обрабатываем ?token= от OAuth провайдеров (VK/Яндекс после редиректа)
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlToken = urlParams.get('token');
+            if (urlToken) {
+                authToken = urlToken;
+                localStorage.setItem('auth_token', authToken);
+                // Очищаем токен из URL чтобы не светился
+                window.history.replaceState({}, document.title, window.location.pathname);
+            } else {
+                authToken = localStorage.getItem('auth_token');
+            }
+
+            if (authToken) {
+                loadUserInfo();
+            } else {
+                initVKID();
+            }
+
+            // Character counters
+            document.getElementById('songIdea')?.addEventListener('input', (e) => {
+                document.getElementById('ideaCounter').textContent = e.target.value.length;
+            });
+            document.getElementById('ownLyrics')?.addEventListener('input', (e) => {
+                document.getElementById('lyricsCounter').textContent = e.target.value.length;
+            });
+        });
+
+        // VK ID Integration (обновлённый код)
+        function initVKID() {
+            if (!window.VKIDSDK) {
+                console.error('VK ID SDK not loaded');
+                return;
+            }
+
+            const VKID = window.VKIDSDK;
+
+            try {
+                VKID.Config.init({
+                    app: 54451761,
+                    redirectUrl: 'https://albi-music.ru/app',
+                    responseMode: VKID.ConfigResponseMode.Callback,
+                    source: VKID.ConfigSource.LOWCODE,
+                    scope: '',
+                });
+
+                const oneTap = new VKID.OneTap();
+                const container = document.getElementById('vk-auth-container');
+
+                if (container) {
+                    oneTap.render({
+                        container: container,
+                        showAlternativeLogin: true,
+                    })
+                    .on(VKID.WidgetEvents.ERROR, (error) => {
+                        // Это нормально — виджет сообщает что пользователь не авторизован в VK
+                        console.warn('VK ID виджет не активен (пользователь не в VK):', error);
+                    })
+                    .on(VKID.OneTapInternalEvents.LOGIN_SUCCESS, async (payload) => {
+                        console.log('VK Login Success:', payload);
+                        const code = payload.code;
+                        const deviceId = payload.device_id;
+
+                        // Обмениваем код на токен
+                        try {
+                            const data = await VKID.Auth.exchangeCode(code, deviceId);
+                            await handleVKAuth(data);
+                        } catch (error) {
+                            console.error('VK exchangeCode error:', error);
+                            // Fallback: перенаправляем на серверный OAuth
+                            await loginVKFallback();
+                        }
+                    });
+                }
+            } catch (err) {
+                console.error('VK ID init error:', err);
+            }
+        }
+
+        // Резервная авторизация через ВКонтакте (серверный OAuth2 редирект)
+        async function loginVKFallback() {
+            try {
+                const response = await axios.get('https://albi-music.ru/auth/vk/login');
+                window.location.href = response.data.auth_url;
+            } catch (err) {
+                console.error('VK fallback auth error:', err);
+                showError('Ошибка авторизации ВКонтакте. Попробуйте Яндекс.');
+            }
+        }
+
+        async function handleVKAuth(vkData) {
+            try {
+                // Отправляем данные VK на наш backend
+                // ВАЖНО: API_BASE уже содержит /api, поэтому используем /auth/vk/token (без /api)
+                const response = await axios.post(`${API_BASE}/auth/vk/token`, {
+                    access_token: vkData.access_token,
+                    user_id: vkData.user_id,
+                    expires_in: vkData.expires_in
+                });
+
+                authToken = response.data.access_token;
+                localStorage.setItem('auth_token', authToken);
+
+                await loadUserInfo();
+            } catch (err) {
+                console.error('VK auth error:', err);
+                showError('Ошибка авторизации VK');
+            }
+        }
+
+        async function authWithYandex() {
+            try {
+                const response = await axios.get('https://albi-music.ru/auth/yandex/login');
+                window.location.href = response.data.auth_url;
+            } catch (err) {
+                console.error('Yandex auth error:', err);
+                showError('Ошибка авторизации Яндекс');
+            }
+        }
+
+        // Гостевой режим для тестирования (без реального backend)
+        function authAsGuest() {
+            // Создаём фейкового пользователя
+            currentUser = {
+                user_id: 'guest_' + Date.now(),
+                username: 'Гость',
+                first_name: 'Тестовый',
+                balance: 10
+            };
+
+            // Фейковый токен
+            authToken = 'guest_token_' + Date.now();
+            localStorage.setItem('auth_token', authToken);
+
+            // Показываем приложение
+            updateBalance(currentUser.balance);
+            document.getElementById('loginScreen').style.display = 'none';
+            document.getElementById('mainApp').style.display = 'block';
+
+            console.log('🎭 Гостевой режим активирован');
+        }
+
+        async function loadUserInfo() {
+            try {
+                const response = await axios.get(`${API_BASE}/user/me`, {
+                    headers: { Authorization: `Bearer ${authToken}` }
+                });
+
+                currentUser = response.data;
+                updateBalance(currentUser.balance);
+
+                document.getElementById('loginScreen').style.display = 'none';
+                document.getElementById('mainApp').style.display = 'block';
+                
+                // Проверяем реферальный код
+                await checkReferralCode();
+            } catch (err) {
+                console.error('Load user info error:', err);
+                localStorage.removeItem('auth_token');
+                location.reload();
+            }
+        }
+
+        function updateBalance(balance) {
+            document.getElementById('userBalance').textContent = `💰 ${balance} генераций`;
+        }
+
+        // ========== ДЕМО-СИСТЕМА (45 сек → разблокировка) ==========
+        function initDemoPlayer(track) {
+            const audioElement = document.getElementById(`audio-${track.id}`);
+            if (!track.is_unlocked && audioElement) {
+                audioElement.addEventListener('timeupdate', function() {
+                    if (this.currentTime >= 45) {
+                        this.pause();
+                        this.currentTime = 45;
+                        showNotification('⏱️ Демо ограничено 45 сек. Разблокируй за 1 токен!');
+                    }
+                });
+                audioElement.addEventListener('seeking', function() {
+                    if (this.currentTime > 45) this.currentTime = 45;
+                });
+            }
+        }
+
+        async function unlockTrack(taskId) {
+            if (!confirm('Разблокировать полную версию за 1 токен?')) return;
+            try {
+                const response = await axios.post(`${API_BASE}/unlock/${taskId}`, {}, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                if (response.data.success) {
+                    alert(`✅ Разблокировано! Осталось: ${response.data.balance} токенов`);
+                    updateBalance(response.data.balance);
+                    await loadMyTracks();
+                }
+            } catch (error) {
+                console.error('Ошибка разблокировки:', error);
+                alert(`❌ ${error.response?.data?.detail || 'Ошибка разблокировки'}`);
+            }
+        }
+
+        // ========== ПЛАТЕЖИ YOOKASSA ==========
+        async function loadPricing() {
+            try {
+                const response = await axios.get(`${API_BASE}/pricing`);
+                const container = document.getElementById('pricingPlans');
+                if (!container) return;
+                
+                container.innerHTML = response.data.plans.map(plan => `
+                    <div class="pricing-card ${plan.amount === 250 ? 'popular' : ''}"
+                         onclick="createPayment(${plan.amount}, ${plan.tokens})"
+                         style="cursor: pointer; padding: 20px; background: rgba(102,126,234,0.1); border-radius: 12px; margin-bottom: 10px;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <div><strong>${plan.tokens} 🎵</strong></div>
+                            <div><strong>${plan.amount} ₽</strong></div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Ошибка загрузки тарифов:', error);
+            }
+        }
+
+        async function createPayment(amount, tokens) {
+            if (!confirm(`Купить ${tokens} токенов за ${amount} ₽?`)) return;
+            try {
+                const response = await axios.post(`${API_BASE}/payment/create`,
+                    { amount: amount },
+                    { headers: { 'Authorization': `Bearer ${authToken}` }}
+                );
+                if (response.data.confirmation_url) {
+                    window.location.href = response.data.confirmation_url;
+                }
+            } catch (error) {
+                console.error('Ошибка платежа:', error);
+                alert('❌ Ошибка создания платежа');
+            }
+        }
+
+        // ========== РЕФЕРАЛЬНАЯ СИСТЕМА ==========
+        async function loadReferralInfo() {
+            try {
+                const linkResponse = await axios.get(`${API_BASE}/referral/link`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const linkInput = document.getElementById('referralLinkInput');
+                if (linkInput) linkInput.value = linkResponse.data.link;
+                
+                const statsResponse = await axios.get(`${API_BASE}/referral/stats`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const countEl = document.getElementById('referralCount');
+                const earnedEl = document.getElementById('referralEarned');
+                if (countEl) countEl.textContent = statsResponse.data.referrals_count || 0;
+                if (earnedEl) earnedEl.textContent = statsResponse.data.tokens_earned || 0;
+            } catch (error) {
+                console.error('Ошибка загрузки реферальной информации:', error);
+            }
+        }
+
+        function copyReferralLinkNew() {
+            const input = document.getElementById('referralLinkInput');
+            if (!input) return;
+            input.select();
+            document.execCommand('copy');
+            alert('✅ Ссылка скопирована!');
+        }
+
+        async function shareReferralLink() {
+            const input = document.getElementById('referralLinkInput');
+            if (!input) return;
+            const link = input.value;
+            
+            if (navigator.share) {
+                try {
+                    await navigator.share({
+                        title: 'ALBI Music - Генератор музыки',
+                        text: 'Создавай музыку с AI! Получи +2 токена 🎵',
+                        url: link
+                    });
+                    alert('✅ Успешно поделились!');
+                } catch (error) {
+                    if (error.name !== 'AbortError') {
+                        copyReferralLinkNew();
+                    }
+                }
+            } else {
+                copyReferralLinkNew();
+            }
+        }
+
+        async function checkReferralCode() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const refCode = urlParams.get('ref');
+            if (refCode && authToken && currentUser) {
+                try {
+                    const response = await axios.post(`${API_BASE}/referral/register`,
+                        { referral_code: refCode },
+                        { headers: { 'Authorization': `Bearer ${authToken}` }}
+                    );
+                    if (response.data.bonus_added) {
+                        alert('🎁 Вы получили +2 токена по реферальной ссылке!');
+                        await loadUserInfo();
+                    }
+                } catch (error) {
+                    console.log('Реферальный код уже использован');
+                }
+            }
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('authError');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            setTimeout(() => {
+                errorDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        function showScreen(screenId) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(screenId).classList.add('active');
+        }
+
+        function navigateTo(screenId) {
+            showScreen(screenId);
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.closest('.nav-btn').classList.add('active');
+        }
+
+        // Generate AI Lyrics
+        async function generateAILyrics() {
+            const idea = document.getElementById('songIdea').value.trim();
+            if (!idea) {
+                alert('Введите описание песни');
+                return;
+            }
+
+            showScreen('loadingScreen');
+            document.getElementById('loadingText').textContent = 'Генерируем текст...';
+
+            // Гостевой режим - мок данные
+            if (authToken && authToken.startsWith('guest_token_')) {
+                setTimeout(() => {
+                    const mockLyrics = `Verse 1:\n${idea}\nЭта песня создана для тебя\nМузыка звучит как мечта\n\nChorus:\n🎵 ${idea} 🎵\nВместе мы создаём волшебство\nСквозь ритм и мелодию\n\nVerse 2:\nКаждый момент особенный\nВ этой песне наше счастье\n\n(Примерный текст для демонстрации)`;
+
+                    sessionData.lyrics = mockLyrics;
+                    sessionData.isAIText = true;
+
+                    document.getElementById('generatedLyrics').textContent = mockLyrics;
+                    showScreen('lyricsReviewScreen');
+                }, 2000);
+                return;
+            }
+
+            try {
+                const response = await axios.post(`${API_BASE}/api/lyrics/generate`, {
+                    prompt: idea
+                }, {
+                    headers: { Authorization: `Bearer ${authToken}` }
+                });
+
+                sessionData.lyrics = response.data.lyrics;
+                sessionData.isAIText = true;
+
+                document.getElementById('generatedLyrics').textContent = response.data.lyrics;
+                showScreen('lyricsReviewScreen');
+            } catch (err) {
+                console.error('Generate lyrics error:', err);
+                alert('❌ Ошибка генерации текста.\n\n💡 В гостевом режиме недоступна реальная генерация.\nАвторизуйтесь через VK или Яндекс для полного функционала!');
+                showScreen('aiTextScreen');
+            }
+        }
+
+        function continueWithOwnLyrics() {
+            const lyrics = document.getElementById('ownLyrics').value.trim();
+            if (!lyrics) {
+                alert('Введите текст песни');
+                return;
+            }
+
+            sessionData.lyrics = lyrics;
+            sessionData.isAIText = false;
+            showScreen('genreSelectionScreen');
+        }
+
+        function selectGenre(genre, displayName) {
+            sessionData.genre = genre;
+            sessionData.isMusic = false;
+            startGeneration();
+        }
+
+        function selectMusicGenre(genre, displayName) {
+            sessionData.genre = genre;
+            sessionData.isMusic = true;
+            startGeneration();
+        }
+
+        function showCustomGenreInput() {
+            const custom = prompt('Опишите желаемый жанр:');
+            if (custom) {
+                sessionData.genre = custom;
+                sessionData.isMusic = false;
+                startGeneration();
+            }
+        }
+
+        function showCustomMusicGenreInput() {
+            const custom = prompt('Опишите желаемый жанр:');
+            if (custom) {
+                sessionData.genre = custom;
+                sessionData.isMusic = true;
+                startGeneration();
+            }
+        }
+
+        async function startGeneration() {
+            showScreen('loadingScreen');
+            document.getElementById('loadingText').textContent = 'Генерируем вашу композицию...';
+
+            // Гостевой режим - имитация генерации
+            if (authToken && authToken.startsWith('guest_token_')) {
+                setTimeout(() => {
+                    alert('🎭 Гостевой режим\n\n✨ В реальной версии здесь будет генерация музыки!\n\n🎵 Жанр: ' + sessionData.genre + '\n⏱ Время генерации: 3-5 минут\n🎁 Результат: 2 трека по 45 секунд\n\n💡 Авторизуйтесь через VK или Яндекс\nчтобы создать настоящую музыку!');
+                    showScreen('welcomeScreen');
+                }, 2000);
+                return;
+            }
+
+            try {
+                const response = await axios.post(`${API_BASE}/api/generate`, {
+                    lyrics: sessionData.lyrics,
+                    genre: sessionData.genre,
+                    is_music: sessionData.isMusic
+                }, {
+                    headers: { Authorization: `Bearer ${authToken}` }
+                });
+
+                // Poll for result
+                const taskId = response.data.task_id;
+                pollGenerationStatus(taskId);
+            } catch (err) {
+                console.error('Generation error:', err);
+                alert('❌ Ошибка генерации.\n\n💡 В гостевом режиме недоступна реальная генерация.\nАвторизуйтесь через VK или Яндекс для полного функционала!');
+                showScreen('welcomeScreen');
+            }
+        }
+
+        async function pollGenerationStatus(taskId) {
+            const maxAttempts = 60; // 5 минут
+            let attempts = 0;
+
+            const interval = setInterval(async () => {
+                attempts++;
+
+                try {
+                    const response = await axios.get(`${API_BASE}/api/generation/${taskId}`, {
+                        headers: { Authorization: `Bearer ${authToken}` }
+                    });
+
+                    if (response.data.status === 'completed') {
+                        clearInterval(interval);
+                        // Redirect to tracks
+                        navigateTo('myTracksScreen');
+                        loadMyTracks();
+                        alert('🎉 Генерация завершена! Проверьте раздел "Мои треки"');
+                    } else if (response.data.status === 'failed') {
+                        clearInterval(interval);
+                        alert('❌ Генерация не удалась. Средства возвращены.');
+                        showScreen('welcomeScreen');
+                    }
+                } catch (err) {
+                    console.error('Poll error:', err);
+                }
+
+                if (attempts >= maxAttempts) {
+                    clearInterval(interval);
+                    alert('⏰ Генерация занимает больше времени. Проверьте позже в разделе "Мои треки"');
+                    showScreen('welcomeScreen');
+                }
+            }, 5000);
+        }
+
+        async function loadMyTracks() {
+            try {
+                const response = await axios.get(`${API_BASE}/history`, {
+                    headers: { Authorization: `Bearer ${authToken}` }
+                });
+
+                const tracks = response.data.history;
+                const container = document.getElementById('tracksList');
+
+                if (tracks.length === 0) {
+                    container.innerHTML = '<div class="alert alert-info">У вас пока нет сохраненных треков.<br><br>Создайте свою первую композицию! 🎵</div>';
+                    return;
+                }
+
+                container.innerHTML = tracks.map((track, idx) => `
+                    <div class="track-item">
+                        <div class="track-header">
+                            <div class="track-title">#${idx + 1}</div>
+                            <div class="track-date">${new Date(track.created_at).toLocaleDateString('ru')}</div>
+                        </div>
+                        <div class="track-prompt">${track.prompt.substring(0, 50)}...</div>
+                        <div class="track-actions">
+                            <button class="btn btn-small" onclick="playTrack('${track.audio_url}')">🔊 Слушать</button>
+                            <button class="btn btn-secondary btn-small" onclick="repeatTrack('${track.task_id}')">🔁 Повторить</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Load tracks error:', err);
+            }
+        }
+
+        function playTrack(audioUrl) {
+            // Parse JSON if needed
+            let urls = [];
+            try {
+                urls = JSON.parse(audioUrl);
+            } catch {
+                urls = [audioUrl];
+            }
+
+            alert(`Воспроизведение: ${urls[0]}`);
+            // TODO: Implement audio player
+        }
+
+        async function loadBalance() {
+            try {
+                const response = await axios.get(`${API_BASE}/user/me`, {
+                    headers: { Authorization: `Bearer ${authToken}` }
+                });
+
+                currentUser = response.data;
+                updateBalance(currentUser.balance);
+
+                document.getElementById('balanceInfo').innerHTML = `
+                    <strong>💰 Ваш баланс:</strong> ${currentUser.balance} генераций<br>
+                    <small>Одна генерация = 2 трека (демо + полная версия)</small>
+                `;
+
+                // Referral link
+                document.getElementById('referralLink').textContent =
+                    `https://albi-music.ru/app?ref=${currentUser.user_id}`;
+            } catch (err) {
+                console.error('Load balance error:', err);
+            }
+        }
+
+        function copyReferralLink() {
+            const link = document.getElementById('referralLink').textContent;
+            navigator.clipboard.writeText(link);
+
+            // Показываем красивое уведомление
+            const button = event.target;
+            const originalText = button.innerHTML;
+            button.innerHTML = '✅ Скопировано!';
+            button.style.background = 'linear-gradient(135deg, #34d399 0%, #059669 100%)';
+
+            setTimeout(() => {
+                button.innerHTML = originalText;
+                button.style.background = '';
+            }, 2000);
+
+            // Показываем инструкцию
+            setTimeout(() => {
+                alert('📋 Ссылка скопирована!\n\n✨ Отправь её друзьям:\n• В Telegram, WhatsApp, ВКонтакте\n• В соцсетях (Instagram, TikTok)\n• В SMS или Email\n\n🎁 За каждого друга получишь 2 генерации (4 трека)!');
+            }, 100);
+        }
+
+        async function buyPackage(price, generations) {
+            try {
+                const response = await axios.post(`${API_BASE}/api/payment/create`, {
+                    amount: price,
+                    generations: generations
+                }, {
+                    headers: { Authorization: `Bearer ${authToken}` }
+                });
+
+                window.location.href = response.data.payment_url;
+            } catch (err) {
+                console.error('Payment error:', err);
+                alert('Ошибка создания платежа');
+            }
+        }
+
+        function goBackFromGenre() {
+            if (sessionData.isAIText) {
+                showScreen('lyricsReviewScreen');
+            } else {
+                showScreen('ownTextScreen');
+            }
+        }
+    </script>
+</body>
+</html>
