@@ -522,19 +522,6 @@
             <div id="welcomeScreen" class="screen active">
                 <div class="welcome">
                     <h1>🎵 Какую песню создадим?</h1>
-                    <div class="occasions">
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">🎂 День рождения друга</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">💖 Признание в любви</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">🎉 Праздник или вечеринка</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">😂 Прикол или розыгрыш</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">🏆 Поздравление с победой</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">📱 Трек для Reels/TikTok</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">💪 Для тренировок</div>
-                        <div class="occasion" style="cursor: default; opacity: 0.9;">🧘 Для медитации</div>
-                    </div>
-                    <p style="font-size: 14px; color: rgba(255, 255, 255, 0.6); margin-bottom: 20px;">
-                        ☝️ Примеры идей для твоих песен
-                    </p>
                     <p class="welcome-text">
                         Опиши идею, выбери жанр — через 2 минуты получишь 2 ДЕМО-версии песни <strong>БЕСПЛАТНО!</strong>
                     </p>
@@ -737,15 +724,13 @@
 
             <!-- Examples Screen -->
             <div id="examplesScreen" class="screen">
-                <h2 style="margin-bottom: 20px;">🎧 ПРИМЕРЫ И ОБУЧЕНИЕ</h2>
+                <h2 style="margin-bottom: 20px;">🎧 ПРИМЕРЫ ТРЕКОВ</h2>
                 <div class="alert alert-info">
                     <p style="margin-bottom: 15px;">
-                        🔐 Это портал для перехода в наш секретный канал<br><br>
-                        <strong>«ALBImusic/ Музыка/ Промпты/ Новости/ Обучение»</strong><br><br>
-                        Там твое вдохновение! Там твоё секретное оружие - идеи! И там же обучение и новости!
+                        Переход на страницу ВКОНТАКТЕ, где расположены примеры треков в разных жанрах!
                     </p>
-                    <button class="btn" onclick="window.open('https://t.me/ALBImusic_chart', '_blank')">
-                        🔐 Перейти в секретный канал
+                    <button class="btn" onclick="window.open('https://vk.com/@-235442407-primery-pesen', '_blank')">
+                        🎵 Перейти к примерам треков
                     </button>
                 </div>
             </div>
@@ -761,7 +746,7 @@
 
             <!-- Referral Screen (НОВЫЙ) -->
             <div id="referralScreen" class="screen">
-                <h2 style="text-align: center; margin-bottom: 20px;">🎁 Реферальная программа</h2>
+                <h2 style="text-align: center; margin-bottom: 20px;">🎁 Пригласить друга</h2>
                 
                 <div style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 15px; margin-bottom: 20px;">
                     <h3 style="margin-bottom: 10px;">Награды:</h3>
@@ -823,15 +808,15 @@
                 </button>
                 <button class="nav-btn" onclick="navigateTo('paymentScreen'); loadPricing();">
                     <div class="nav-icon">💳</div>
-                    <div>Купить</div>
+                    <div>Баланс</div>
                 </button>
                 <button class="nav-btn" onclick="navigateTo('referralScreen'); loadReferralInfo();">
                     <div class="nav-icon">🎁</div>
-                    <div>Рефералы</div>
+                    <div>Пригласить друга</div>
                 </button>
                 <button class="nav-btn" onclick="navigateTo('examplesScreen')">
                     <div class="nav-icon">🎧</div>
-                    <div>Примеры</div>
+                    <div>Примеры треков</div>
                 </button>
             </div>
         </div>
@@ -852,6 +837,12 @@
             isAIText: false,
             isMusic: false
         };
+
+        // [FIX A4] Глобальный ID активного polling-интервала — предотвращает дублирование
+        let activePollInterval = null;
+
+        // [FIX B1] Флаг активной генерации — предотвращает двойной клик по кнопкам жанра
+        let isGenerating = false;
 
         // ========== NOTIFICATION SYSTEM ==========
         function showNotification(message, type = 'info') {
@@ -945,7 +936,7 @@
                 window.location.href = response.data.auth_url;
             } catch (err) {
                 console.error('VK fallback auth error:', err);
-                showError('Ошибка авторизации ВКонтакте. Попробуйте Яндекс.');
+                showError('Ошибка авторизации ВКонтакте. Пожалуйста, войдите через Яндекс.');
             }
         }
 
@@ -965,7 +956,7 @@
                 await loadUserInfo();
             } catch (err) {
                 console.error('VK auth error:', err);
-                showError('Ошибка авторизации VK');
+                showError('Ошибка авторизации ВКонтакте. Пожалуйста, войдите через Яндекс.');
             }
         }
 
@@ -1015,6 +1006,25 @@
                 
                 // Проверяем реферальный код
                 await checkReferralCode();
+
+                // [FIX A5] Восстанавливаем незавершённую генерацию после перезагрузки страницы
+                // Ранее: task_id хранился только в локальной JS-переменной → терялся при f5 (БАГ #5)
+                const savedTaskId = localStorage.getItem('active_task_id');
+                if (savedTaskId) {
+                    const startedAt = parseInt(localStorage.getItem('active_task_start') || '0');
+                    const elapsed = Date.now() - startedAt;
+                    // Восстанавливаем только если с начала прошло не более 10 минут
+                    if (elapsed < 10 * 60 * 1000) {
+                        console.log('[FIX A5] Восстanавливаем активную генерацию:', savedTaskId);
+                        document.getElementById('loadingText').textContent = 'Восстанавливаем генерацию...';
+                        showScreen('loadingScreen');
+                        pollGenerationStatus(savedTaskId);
+                    } else {
+                        // Генерация слишком старая — очищаем
+                        localStorage.removeItem('active_task_id');
+                        localStorage.removeItem('active_task_start');
+                    }
+                }
             } catch (err) {
                 console.error('Load user info error:', err);
                 localStorage.removeItem('auth_token');
@@ -1063,23 +1073,54 @@
         // ========== ПЛАТЕЖИ YOOKASSA ==========
         async function loadPricing() {
             try {
-                const response = await axios.get(`${API_BASE}/pricing`);
                 const container = document.getElementById('pricingPlans');
                 if (!container) return;
-                
-                container.innerHTML = response.data.plans.map(plan => `
-                    <div class="pricing-card ${plan.amount === 250 ? 'popular' : ''}"
+
+                // Статичные тарифы с понятным описанием
+                const plans = [
+                    { tokens: 1,   songs: 2,   amount: 50,   popular: false },
+                    { tokens: 10,  songs: 20,  amount: 250,  popular: true  },
+                    { tokens: 25,  songs: 50,  amount: 500,  popular: false },
+                    { tokens: 60,  songs: 120, amount: 1000, popular: false },
+                    { tokens: 140, songs: 280, amount: 2000, popular: false },
+                ];
+
+                const referralCard = `
+                    <div class="pricing-card" onclick="navigateToReferral()"
+                         style="cursor: pointer; padding: 20px; background: rgba(102,126,234,0.1); border-radius: 12px; margin-bottom: 10px; border: 1px solid rgba(102,126,234,0.4);">
+                        <div style="font-size: 16px; font-weight: bold;">🎁 Пригласить друга</div>
+                        <div style="color: rgba(255,255,255,0.7); font-size: 14px; margin-top: 6px;">2 токена в подарок</div>
+                    </div>
+                `;
+
+                const planCards = plans.map(plan => `
+                    <div class="pricing-card ${plan.popular ? 'popular' : ''}"
                          onclick="createPayment(${plan.amount}, ${plan.tokens})"
                          style="cursor: pointer; padding: 20px; background: rgba(102,126,234,0.1); border-radius: 12px; margin-bottom: 10px;">
-                        <div style="display: flex; justify-content: space-between;">
-                            <div><strong>${plan.tokens} 🎵</strong></div>
-                            <div><strong>${plan.amount} ₽</strong></div>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div style="font-size: 15px; font-weight: bold;">${plan.tokens} токен${plan.tokens === 1 ? '' : plan.tokens < 5 ? 'а' : 'ов'} (${plan.songs} песн${plan.songs === 2 ? 'и' : 'ей'})</div>
+                            <div style="font-size: 18px; color: #667eea; font-weight: bold;">${plan.amount} ₽</div>
                         </div>
                     </div>
                 `).join('');
+
+                container.innerHTML = referralCard + planCards;
             } catch (error) {
                 console.error('Ошибка загрузки тарифов:', error);
             }
+        }
+
+        function navigateToReferral() {
+            navigateTo = function(screenId) {
+                showScreen(screenId);
+                document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            };
+            showScreen('referralScreen');
+            loadReferralInfo();
+            // Активируем кнопку "Пригласить друга" в навигации
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                if (btn.textContent.includes('Пригласить')) btn.classList.add('active');
+            });
         }
 
         async function createPayment(amount, tokens) {
@@ -1105,26 +1146,44 @@
                     headers: { 'Authorization': `Bearer ${authToken}` }
                 });
                 const linkInput = document.getElementById('referralLinkInput');
-                if (linkInput) linkInput.value = linkResponse.data.link;
-                
-                const statsResponse = await axios.get(`${API_BASE}/referral/stats`, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
+                // API возвращает поле referral_url
+                if (linkInput) linkInput.value = linkResponse.data.referral_url || '';
+
                 const countEl = document.getElementById('referralCount');
                 const earnedEl = document.getElementById('referralEarned');
-                if (countEl) countEl.textContent = statsResponse.data.referrals_count || 0;
-                if (earnedEl) earnedEl.textContent = statsResponse.data.tokens_earned || 0;
+                if (countEl) countEl.textContent = linkResponse.data.total_invited || 0;
+                if (earnedEl) earnedEl.textContent = linkResponse.data.tokens_earned || 0;
             } catch (error) {
                 console.error('Ошибка загрузки реферальной информации:', error);
+                // При ошибке показываем ссылку на основе user_id
+                if (currentUser) {
+                    const linkInput = document.getElementById('referralLinkInput');
+                    if (linkInput) linkInput.value = `https://albi-music.ru/app/?ref=ref_${currentUser.user_id}`;
+                }
             }
         }
 
         function copyReferralLinkNew() {
             const input = document.getElementById('referralLinkInput');
-            if (!input) return;
-            input.select();
-            document.execCommand('copy');
-            alert('✅ Ссылка скопирована!');
+            if (!input || !input.value) {
+                alert('❌ Ссылка ещё не загружена. Подождите секунду.');
+                return;
+            }
+            const link = input.value;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(link)
+                    .then(() => alert('✅ Ссылка скопирована!'))
+                    .catch(() => {
+                        // Fallback для старых браузеров
+                        input.select();
+                        document.execCommand('copy');
+                        alert('✅ Ссылка скопирована!');
+                    });
+            } else {
+                input.select();
+                document.execCommand('copy');
+                alert('✅ Ссылка скопирована!');
+            }
         }
 
         async function shareReferralLink() {
@@ -1181,6 +1240,17 @@
         function showScreen(screenId) {
             document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
             document.getElementById(screenId).classList.add('active');
+            // [FIX A4] При возврате на главный экран — отменяем висящий polling интервал
+            // Ранее: интервал продолжал работать в фоне → двойные алерты (БАГ #4)
+            if (screenId === 'welcomeScreen' && activePollInterval) {
+                clearInterval(activePollInterval);
+                activePollInterval = null;
+                localStorage.removeItem('active_task_id');
+                localStorage.removeItem('active_task_start');
+                isGenerating = false;
+                document.querySelectorAll('.genre-btn').forEach(btn => btn.disabled = false);
+                console.log('[FIX A4] activePollInterval очищен при переходе на welcomeScreen');
+            }
         }
 
         function navigateTo(screenId) {
@@ -1215,8 +1285,8 @@
             }
 
             try {
-                const response = await axios.post(`${API_BASE}/api/lyrics/generate`, {
-                    prompt: idea
+                const response = await axios.post(`${API_BASE}/generate/lyrics`, {
+                    idea: idea
                 }, {
                     headers: { Authorization: `Bearer ${authToken}` }
                 });
@@ -1276,11 +1346,23 @@
         }
 
         async function startGeneration() {
+            // [FIX B1] Анти-дубль: блокируем повторный запуск при уже активной генерации
+            // Ранее: двойной клик по кнопке жанра = двойное списание токена (БАГ #7)
+            if (isGenerating) {
+                console.warn('[FIX B1] Генерация уже запущена, игнорируем повторный запрос');
+                return;
+            }
+            isGenerating = true;
+            // Блокируем кнопки жанров визуально
+            document.querySelectorAll('.genre-btn').forEach(btn => btn.disabled = true);
+
             showScreen('loadingScreen');
             document.getElementById('loadingText').textContent = 'Генерируем вашу композицию...';
 
             // Гостевой режим - имитация генерации
             if (authToken && authToken.startsWith('guest_token_')) {
+                isGenerating = false;
+                document.querySelectorAll('.genre-btn').forEach(btn => btn.disabled = false);
                 setTimeout(() => {
                     alert('🎭 Гостевой режим\n\n✨ В реальной версии здесь будет генерация музыки!\n\n🎵 Жанр: ' + sessionData.genre + '\n⏱ Время генерации: 3-5 минут\n🎁 Результат: 2 трека по 45 секунд\n\n💡 Авторизуйтесь через VK или Яндекс\nчтобы создать настоящую музыку!');
                     showScreen('welcomeScreen');
@@ -1289,53 +1371,108 @@
             }
 
             try {
-                const response = await axios.post(`${API_BASE}/api/generate`, {
-                    lyrics: sessionData.lyrics,
-                    genre: sessionData.genre,
-                    is_music: sessionData.isMusic
-                }, {
-                    headers: { Authorization: `Bearer ${authToken}` }
-                });
+                let response;
+                if (sessionData.isMusic) {
+                    // Инструментальная музыка без слов
+                    response = await axios.post(`${API_BASE}/generate/music`, {
+                        style: sessionData.genre
+                    }, {
+                        headers: { Authorization: `Bearer ${authToken}` }
+                    });
+                } else {
+                    // Песня с текстом
+                    response = await axios.post(`${API_BASE}/generate/song`, {
+                        lyrics: sessionData.lyrics,
+                        genre: sessionData.genre
+                    }, {
+                        headers: { Authorization: `Bearer ${authToken}` }
+                    });
+                }
 
-                // Poll for result
+                // Poll for result — isGenerating сбросится внутри pollGenerationStatus при завершении
                 const taskId = response.data.task_id;
                 pollGenerationStatus(taskId);
             } catch (err) {
+                // Сбрасываем флаги при ошибке HTTP запроса
+                isGenerating = false;
+                document.querySelectorAll('.genre-btn').forEach(btn => btn.disabled = false);
                 console.error('Generation error:', err);
-                alert('❌ Ошибка генерации.\n\n💡 В гостевом режиме недоступна реальная генерация.\nАвторизуйтесь через VK или Яндекс для полного функционала!');
+                const errDetail = err.response?.data?.detail || 'Неизвестная ошибка';
+                if (err.response?.status === 402) {
+                    alert('❌ Недостаточно токенов. Пополните баланс!');
+                } else if (err.response?.status === 429) {
+                    alert('⏳ Слишком много запросов. Подождите немного.');
+                } else {
+                    alert('❌ Ошибка генерации: ' + errDetail);
+                }
                 showScreen('welcomeScreen');
             }
         }
 
         async function pollGenerationStatus(taskId) {
-            const maxAttempts = 60; // 5 минут
+            // [FIX A4] Отменяем предыдущий интервал перед стартом нового — предотвращает стacking
+            if (activePollInterval) {
+                clearInterval(activePollInterval);
+                activePollInterval = null;
+            }
+
+            // [FIX A5] Сохраняем task_id в sessionStorage — восстанавливается при перезагрузке
+            localStorage.setItem('active_task_id', taskId);
+            localStorage.setItem('active_task_start', Date.now().toString());
+
+            const maxAttempts = 72; // 6 минут (Suno timeout ~5 мин)
             let attempts = 0;
 
-            const interval = setInterval(async () => {
+            const _stopPoll = (clearSession = true) => {
+                clearInterval(activePollInterval);
+                activePollInterval = null;
+                if (clearSession) {
+                    localStorage.removeItem('active_task_id');
+                    localStorage.removeItem('active_task_start');
+                }
+                isGenerating = false;
+                document.querySelectorAll('.genre-btn').forEach(btn => btn.disabled = false);
+            };
+
+            activePollInterval = setInterval(async () => {
                 attempts++;
 
                 try {
-                    const response = await axios.get(`${API_BASE}/api/generation/${taskId}`, {
+                    const response = await axios.get(`${API_BASE}/generation/${taskId}/status`, {
                         headers: { Authorization: `Bearer ${authToken}` }
                     });
 
                     if (response.data.status === 'completed') {
-                        clearInterval(interval);
-                        // Redirect to tracks
-                        navigateTo('myTracksScreen');
+                        _stopPoll();
+                        // Обновляем баланс из API
+                        try { await loadBalance(); } catch(e) {}
+                        // Переходим к трекам без event (showScreen + ручная подсветка навигации)
+                        showScreen('myTracksScreen');
+                        document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
                         loadMyTracks();
-                        alert('🎉 Генерация завершена! Проверьте раздел "Мои треки"');
-                    } else if (response.data.status === 'failed') {
-                        clearInterval(interval);
-                        alert('❌ Генерация не удалась. Средства возвращены.');
+                        alert('🎉 Генерация завершена! Ваша музыка готова!');
+
+                    } else if (response.data.status === 'failed' || response.data.status === 'error') {
+                        // [FIX A1] Оба статуса ('failed' и 'error' от Celery) обрабатываются
+                        // Ранее: 'error' не распознавался → спиннер крутился 5 минут (БАГ #1)
+                        _stopPoll();
+                        try { await loadBalance(); } catch(e) {}
+                        const errMsg = response.data.error || 'Генерация не удалась. Токен возвращён на баланс.';
+                        alert('❌ ' + errMsg);
                         showScreen('welcomeScreen');
                     }
+                    // Статусы 'processing' / 'pending' / 'unknown' → продолжаем polling
                 } catch (err) {
-                    console.error('Poll error:', err);
+                    if (err.response?.status === 404) {
+                        // Задача ещё не записана в БД — нормально, ждём
+                        console.log('[poll] task not found yet, waiting...');
+                    } else {
+                        console.error('Poll error:', err);
+                    }
                 }
 
                 if (attempts >= maxAttempts) {
-                    clearInterval(interval);
+                    _stopPoll();
                     alert('⏰ Генерация занимает больше времени. Проверьте позже в разделе "Мои треки"');
                     showScreen('welcomeScreen');
                 }
@@ -1356,35 +1493,73 @@
                     return;
                 }
 
-                container.innerHTML = tracks.map((track, idx) => `
+                container.innerHTML = tracks.map((track, idx) => {
+                    // [FIX B2] API возвращает audio_urls (массив), а не audio_url (строку) — БАГ #6
+                    const audioUrls = track.audio_urls || [];
+                    const hasAudio = audioUrls.length > 0;
+                    // [FIX B4] Защита от null промта в истории — TypeError при substring(БАГ #9)
+                    const promptText = (track.prompt || 'Без описания').substring(0, 50);
+                    const statusIcon = track.status === 'completed' ? '✅' :
+                                       track.status === 'processing' ? '⏳' : '❌';
+
+                    // Сериализуем массив URL для передачи в onclick безопасно
+                    const urlsJson = JSON.stringify(audioUrls).replace(/'/g, '&#39;');
+
+                    return `
                     <div class="track-item">
                         <div class="track-header">
-                            <div class="track-title">#${idx + 1}</div>
+                            <div class="track-title">#${idx + 1} ${statusIcon}</div>
                             <div class="track-date">${new Date(track.created_at).toLocaleDateString('ru')}</div>
                         </div>
-                        <div class="track-prompt">${track.prompt.substring(0, 50)}...</div>
+                        <div class="track-prompt">${promptText}...</div>
                         <div class="track-actions">
-                            <button class="btn btn-small" onclick="playTrack('${track.audio_url}')">🔊 Слушать</button>
+                            ${hasAudio
+                                ? `<button class="btn btn-small" onclick='playTrack(${urlsJson})'>🔊 Слушать</button>`
+                                : `<button class="btn btn-small" disabled title="Трек ещё генерируется">⏳ Генерация...</button>`}
                             <button class="btn btn-secondary btn-small" onclick="repeatTrack('${track.task_id}')">🔁 Повторить</button>
                         </div>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
             } catch (err) {
                 console.error('Load tracks error:', err);
             }
         }
 
-        function playTrack(audioUrl) {
-            // Parse JSON if needed
-            let urls = [];
-            try {
-                urls = JSON.parse(audioUrl);
-            } catch {
-                urls = [audioUrl];
+        function playTrack(audioUrls) {
+            // [FIX B2] Реальный аудиоплеер вместо alert() с URL (БАГ #6)
+            // audioUrls может прийти как массив (из loadMyTracks) или строка (обратная совместимость)
+            let urls = audioUrls;
+            if (typeof audioUrls === 'string') {
+                try { urls = JSON.parse(audioUrls); } catch { urls = [audioUrls]; }
+            }
+            if (!Array.isArray(urls) || urls.length === 0) {
+                alert('❌ Нет доступного аудио для воспроизведения');
+                return;
             }
 
-            alert(`Воспроизведение: ${urls[0]}`);
-            // TODO: Implement audio player
+            // Убираем предыдущий плеер если есть
+            const existing = document.getElementById('audioPlayerContainer');
+            if (existing) existing.remove();
+
+            // Создаём inline аудиоплеер поверх контента
+            const container = document.createElement('div');
+            container.id = 'audioPlayerContainer';
+            container.style.cssText = 'position:fixed;bottom:72px;left:0;right:0;background:linear-gradient(135deg,#1a1a2e,#16213e);padding:12px 16px;z-index:9999;border-top:2px solid #667eea;box-shadow:0 -4px 20px rgba(0,0,0,0.5);';
+            container.innerHTML = `
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:${urls.length > 1 ? '8px' : '0'}">
+                    <span style="color:#a0aec0;font-size:12px;white-space:nowrap;">🎵 Вариант 1</span>
+                    <audio controls autoplay style="flex:1;height:36px;"
+                           src="${urls[0]}">Ваш браузер не поддерживает аудио</audio>
+                    <button onclick="document.getElementById('audioPlayerContainer').remove()"
+                            style="background:transparent;border:none;color:#a0aec0;cursor:pointer;font-size:20px;padding:0 4px;">✕</button>
+                </div>
+                ${urls.length > 1 ? `
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span style="color:#a0aec0;font-size:12px;white-space:nowrap;">🎵 Вариант 2</span>
+                    <audio controls style="flex:1;height:36px;" src="${urls[1]}"></audio>
+                </div>` : ''}
+            `;
+            document.body.appendChild(container);
         }
 
         async function loadBalance() {

@@ -924,8 +924,27 @@ def generate_music_task(self, user_id, prompt, task_id=None):
             logger.info(f"📝 Результат задачи {task_id} гарантированно сохранен: {result_status}")
         except Exception as save_error:
             logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить результат задачи {task_id}: {save_error}")
-            # Даже если не удалось сохранить в БД, Celery получит результат
-        
+
+        # [FIX A2] ВОЗВРАТ ТОКЕНА И СБРОС СЧЕТЧИКА active_generations
+        # generate_music_task: ранее возврата токена не было — БАГ #2 + БАГ #3
+        if user_id != config.ADMIN_ID:
+            if result_status == 'error':
+                try:
+                    execute_query_sync(
+                        "SELECT refund_tokens(%s, %s, %s)",
+                        (user_id, 1, f"Music generation error: {result_message}")
+                    )
+                    logger.info(f"💰 [FIX A2] Возврат 1 токена на баланс user {user_id} (ошибка музыки)")
+                except Exception as refund_error:
+                    logger.error(f"❌ Не удалось вернуть токен user {user_id}: {refund_error}")
+            else:
+                # При успехе тоже уменьшаем счётчик active_generations
+                try:
+                    execute_query_sync("SELECT finish_generation(%s)", (user_id,))
+                    logger.info(f"✅ [FIX A2] active_generations уменьшен для user {user_id} (музыка завершена)")
+                except Exception as finish_err:
+                    logger.error(f"❌ Не удалось вызвать finish_generation user {user_id}: {finish_err}")
+
         # 5. ВОЗВРАТ РЕЗУЛЬТАТА В CELERY
         if result_status == 'completed':
             return {
@@ -1027,18 +1046,26 @@ def generate_song_task(self, user_id, lyrics, style, custom_mode=False, is_song=
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
     
     finally:
-        # 5. ВОЗВРАТ СРЕДСТВ ПРИ ОШИБКЕ (для не-админов)
-        if result_status == 'error':
-            # Проверяем что это не админ
-            if user_id != config.ADMIN_ID:
+        # [FIX A3] ВОЗВРАТ СРЕДСТВ И СБРОС СЧЕТЧИКА active_generations
+        # Ранее: прямой UPDATE balance+1 не вызывал finish_generation() — БАГ #3
+        # Теперь: refund_tokens() возвращает токен И уменьшает active_generations атомарно
+        if user_id != config.ADMIN_ID:
+            if result_status == 'error':
                 try:
                     execute_query_sync(
-                        "UPDATE users SET balance = balance + 1 WHERE user_id = %s",
-                        (user_id,)
+                        "SELECT refund_tokens(%s, %s, %s)",
+                        (user_id, 1, f"Song generation error: {result_message}")
                     )
-                    logger.info(f"💰 Возврат 1 генерации на баланс user {user_id} из-за ошибки")
+                    logger.info(f"💰 [FIX A3] Возврат 1 токена на баланс user {user_id} (ошибка песни)")
                 except Exception as refund_error:
-                    logger.error(f"❌ Не удалось вернуть средства user {user_id}: {refund_error}")
+                    logger.error(f"❌ Не удалось вернуть токен user {user_id}: {refund_error}")
+            else:
+                # При успехе тоже уменьшаем счётчик active_generations
+                try:
+                    execute_query_sync("SELECT finish_generation(%s)", (user_id,))
+                    logger.info(f"✅ [FIX A3] active_generations уменьшен для user {user_id} (песня завершена)")
+                except Exception as finish_err:
+                    logger.error(f"❌ Не удалось вызвать finish_generation user {user_id}: {finish_err}")
 
         # 6. ГАРАНТИРОВАННОЕ СОХРАНЕНИЕ РЕЗУЛЬТАТА (ВЫПОЛНИТСЯ ВСЕГДА)
         try:
@@ -1054,7 +1081,6 @@ def generate_song_task(self, user_id, lyrics, style, custom_mode=False, is_song=
             logger.info(f"📝 Результат задачи {task_id} гарантированно сохранен: {result_status}")
         except Exception as save_error:
             logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить результат задачи {task_id}: {save_error}")
-            # Даже если не удалось сохранить в БД, Celery получит результат
 
         # 7. ВОЗВРАТ РЕЗУЛЬТАТА В CELERY
         if result_status == 'completed':

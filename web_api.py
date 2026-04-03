@@ -43,16 +43,13 @@ logger = logging.getLogger(__name__)
 # Импорт Celery задач (опциональный для совместимости)
 try:
     from celery_tasks import (
-        generate_suno_music_sync,
-        generate_suno_song_sync,
-        generate_suno_lyrics_sync,
+        generate_music_task,       # Celery task: generate_music_task.delay(user_id, prompt)
+        generate_song_task,        # Celery task: generate_song_task.delay(user_id, lyrics, style, custom_mode)
+        generate_suno_lyrics_sync, # Синхронная функция генерации текста (без Celery)
         generate_karaoke_task,
         generate_cover_task,
         generate_wav_task
     )
-    # Алиасы для обратной совместимости
-    generate_music_task = generate_suno_music_sync
-    generate_song_task = generate_suno_song_sync
     CELERY_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"⚠️ Celery tasks import failed: {e}. Generation endpoints will not work.")
@@ -370,7 +367,8 @@ async def oauth_callback(provider: str, code: str, state: str):
                     "grant_type": "authorization_code",
                     "code": code,
                     "client_id": config["client_id"],
-                    "client_secret": config["client_secret"]
+                    "client_secret": config["client_secret"],
+                    "redirect_uri": config["redirect_uri"]
                 }
                 token_response = await client.post(config["token_url"], data=token_params)
                 token_data = token_response.json()
@@ -606,8 +604,10 @@ async def generate_lyrics(request: GenerateLyricsRequest, user_id: int = Depends
         if not (rate_check and rate_check[0][0]):
             raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait.")
         
-        # Генерируем текст синхронно (БЕЗ списания токенов)
-        lyrics = generate_suno_lyrics_sync(request.idea[:200])
+        # [FIX B3] Генерируем текст через asyncio.to_thread чтобы не блокировать event loop FastAPI
+        # Ранее: синхронный вызов freeze'ил весь API на 5-15 сек (БАГ #8)
+        import asyncio
+        lyrics = await asyncio.to_thread(generate_suno_lyrics_sync, request.idea[:200])
         
         if not lyrics:
             raise HTTPException(status_code=500, detail="Failed to generate lyrics")
@@ -725,8 +725,11 @@ async def get_generation_status(task_id: str, user_id: int = Depends(get_current
                 response_data["audio_urls"] = [audio_url] if audio_url else []
                 response_data["is_demo"] = True
                 response_data["is_first_generation"] = False
-        elif status_value == "failed":
-            response_data["error"] = error_message
+        elif status_value in ("failed", "error"):
+            # [FIX A1] Celery пишет статус 'error', фронтенд ждал 'failed' — 5 мин впустую (БАГ #1)
+            # Теперь оба значения возвращают поле error — фронтенд сразу покажет ошибку
+            response_data["error"] = error_message or "Генерация не удалась. Токен возвращён."
+            logger.info(f"[FIX A1] Generation {task_id} ended with status={status_value}, returning as failed to frontend")
 
         return JSONResponse(response_data)
 
