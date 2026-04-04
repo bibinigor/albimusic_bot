@@ -464,11 +464,14 @@ def track_first_menu_action(user_id):
         logging.error(f"❌ Ошибка track_first_menu_action: {e}")
 
 
-async def create_yookassa_payment(user_id, amount, description):
+async def create_yookassa_payment(user_id, amount, description, extra_metadata=None):
     headers = {
         'Idempotence-Key': str(uuid.uuid4()),
         'Content-Type': 'application/json'
     }
+    metadata = {"user_id": user_id}
+    if extra_metadata:
+        metadata.update(extra_metadata)
     data = {
         "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
         "capture": True,
@@ -477,7 +480,7 @@ async def create_yookassa_payment(user_id, amount, description):
             "return_url": "https://albi-music.ru/payment/success"
         },
         "description": description,
-        "metadata": {"user_id": user_id}
+        "metadata": metadata
     }
     try:
         async with aiohttp.ClientSession() as session:
@@ -636,13 +639,51 @@ async def process_generation_background(user_id, style, lyrics, is_song, is_free
             pass
         await bot.send_message(chat_id, "❌ Произошла ошибка при постановке задачи в очередь. Попробуйте позже.")
 
+# ===================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ===================================================================
+
+async def send_zero_balance_message(user_id, state=None):
+    """Отправляет сообщение о нулевом балансе с кнопкой подписки на канал"""
+    if state:
+        await state.finish()
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("✅ Я подписался! Давай песню", callback_data="check_subscription"),
+        InlineKeyboardButton("💳 Не хочу подписываться, хочу купить пакет", callback_data="go_to_balance")
+    )
+    await bot.send_message(
+        user_id,
+        "🛑 Ой, бесплатные генерации закончились!\n\n"
+        "Хочешь прямо сейчас получить еще 1 песню АБСОЛЮТНО БЕСПЛАТНО?\n\n"
+        "1️⃣ Подпишись на наш официальный канал:\n"
+        "<a href='https://t.me/ALBImusic_Chart'>@ALBImusic_Chart</a>\n"
+        "Там мы публикуем самые смешные треки и раздаём промокоды!\n\n"
+        "2️⃣ Возвращайся сюда и жми кнопку «Я подписался».\n\n"
+        "3️⃣ Бот автоматически начислит тебе генерацию!",
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
+
+async def check_channel_subscription(user_id: int) -> bool:
+    """Проверяет подписку пользователя на официальный канал через Telegram API"""
+    try:
+        member = await bot.get_chat_member(chat_id="@ALBImusic_Chart", user_id=user_id)
+        return member.status in ('member', 'administrator', 'creator', 'restricted')
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка проверки подписки для {user_id}: {e}")
+        return False
+
+# ===================================================================
+# КЛАВИАТУРЫ
+# ===================================================================
+
 # Клавиатуры
 def get_main_menu_keyboard(user_id=None):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton("🎵 Создать песню"), KeyboardButton("🎶 Создать музыку"))
-    markup.add(KeyboardButton("🎬 Фото и Видео"), KeyboardButton("🎨 Изображения"))
     markup.add(KeyboardButton("📂 Мои треки"), KeyboardButton("💰 Баланс"))
-    markup.add(KeyboardButton("🎧 Примеры песен и промптов"), KeyboardButton("📞 Поддержка"))
+    markup.add(KeyboardButton("❤️ Примеры песен"), KeyboardButton("📞 Поддержка"))
     if user_id and user_id == config.ADMIN_ID:
         markup.add(KeyboardButton("👨‍💻 Админ панель"))
     return markup
@@ -668,11 +709,10 @@ def get_balance_keyboard(user_id):
     markup.add(
         InlineKeyboardButton("📄 Документы", callback_data="show_documents"),
         InlineKeyboardButton("🌟 Пригласить друга (2 токена в подарок)", callback_data="invite_friend"),
-        InlineKeyboardButton("💫 1 токен (2 песни) — 50₽", callback_data="pay_100"),
-        InlineKeyboardButton("💳 10 токенов (20 песен) — 250₽", callback_data="pay_500"),
-        InlineKeyboardButton("🔥 25 токенов (50 песен) — 500₽", callback_data="pay_1000"),
-        InlineKeyboardButton("⭐ 60 токенов (120 песен) — 1000₽", callback_data="pay_2000"),
-        InlineKeyboardButton("💎 140 токенов (280 песен) — 2000₽", callback_data="pay_4000")
+        InlineKeyboardButton("💳 10 генераций (20 треков) — 490₽", callback_data="pay_500"),
+        InlineKeyboardButton("🔥 25 генераций (50 треков) — 990₽ (ХИТ!)", callback_data="pay_1000"),
+        InlineKeyboardButton("⭐ 60 генераций (120 треков) — 1990₽", callback_data="pay_2000"),
+        InlineKeyboardButton("💎 140 генераций (280 треков) — 3990₽", callback_data="pay_4000")
     )
     return markup
 
@@ -746,41 +786,59 @@ async def yookassa_webhook(request: Request):
             if user_id and amount:
                 # Определяем количество токенов по сумме
                 amount_to_tokens = {
-                    50.00: 1,
+                    99.00: 5,
                     250.00: 10,
-                    500.00: 25,
-                    1000.00: 60,
-                    2000.00: 140,
-                    # Совместимость со старыми ценами
-                    100.00: 1,
                     490.00: 10,
+                    500.00: 25,
                     990.00: 25,
+                    1000.00: 60,
                     1990.00: 60,
+                    2000.00: 140,
                     3990.00: 140,
-                    4000.00: 140
+                    4000.00: 140,
+                    # Совместимость со старыми ценами
+                    50.00: 1,
+                    100.00: 1,
                 }
 
                 tokens = amount_to_tokens.get(amount, 1)  # По умолчанию 1 если сумма неизвестна
+                package_type = payment.get('metadata', {}).get('package_type', '')
 
                 add_balance(user_id, tokens)
                 add_payment(user_id, amount, 'succeeded', payment.get('id'))
-                logging.info(f"✅ Начислено {tokens} токенов пользователю {user_id}")
+                logging.info(f"✅ Начислено {tokens} токенов пользователю {user_id} (пакет: {package_type})")
 
                 try:
-                    inline_kb = InlineKeyboardMarkup(row_width=2)
-                    inline_kb.add(
-                        InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
-                        InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
-                    )
-                    await bot.send_message(
-                        int(user_id),
-                        f"🎉 Спасибо! Оплата поступила!\n\n"
-                        f"💰 Начислено: *{tokens} токенов*\n\n"
-                        f"🎵 Теперь вы получаете полные версии песен!\n\n"
-                        f"Нажмите кнопку ниже чтобы начать 👇",
-                        reply_markup=inline_kb,
-                        parse_mode="Markdown"
-                    )
+                    if package_type == 'novice':
+                        # Пакет «Новичок» — специальное сообщение
+                        await bot.send_message(
+                            int(user_id),
+                            "🎉 Пакет «Новичок» активирован. Тебе начислено 5 токенов. Твори прямо сейчас!\n\n"
+                            "И обязательно посмотри примеры треков в нашем канале — <a href='https://t.me/ALBImusic_Chart/146'>ЗДЕСЬ</a>",
+                            parse_mode="HTML"
+                        )
+                    elif package_type == 'weekend':
+                        # Пакет «Выходные» — специальное сообщение
+                        await bot.send_message(
+                            int(user_id),
+                            "🎉 Тебе начислено 5 токенов. Пакет «Выходные» активирован. Срочно пиши песни про друзей!",
+                            parse_mode="HTML"
+                        )
+                    else:
+                        inline_kb = InlineKeyboardMarkup(row_width=2)
+                        inline_kb.add(
+                            InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
+                            InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
+                        )
+                        await bot.send_message(
+                            int(user_id),
+                            f"🎉 Спасибо! Оплата поступила!\n\n"
+                            f"💰 Начислено: *{tokens} токенов*\n\n"
+                            f"🎵 Теперь вы получаете полные версии песен!\n\n"
+                            f"Нажмите кнопку ниже чтобы начать 👇",
+                            reply_markup=inline_kb,
+                            parse_mode="Markdown"
+                        )
                 except Exception as e:
                     logging.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {e}")
                 return JSONResponse({"status": "ok"})
@@ -950,13 +1008,7 @@ async def handle_balance(message: types.Message, state: FSMContext):
     text = (
         f"💰 *Ваш баланс:* {balance}\n\n"
         f"💳 *Пополнить баланс:*\n\n"
-        f"💫 1 токен (2 песни) — 50₽\n"
-        f"💳 10 токенов (20 песен) — 250₽\n"
-        f"🔥 25 токенов (50 песен) — 500₽\n"
-        f"⭐ 60 токенов (120 песен) — 1000₽\n"
-        f"💎 140 токенов (280 песен) — 2000₽\n\n"
-        f"🌟 *Пригласи друга* — получи 2 токена бесплатно!\n"
-        f"🎁 *Первый токен в подарок* — для новых пользователей!\n\n"
+        f"🌟 *Пригласи друга* — получи 2 токена бесплатно\!\n\n"
         f"🎵 Вдохновение — в нашем канале: @ALBImusic\_chart"
     )
     await message.answer(text, reply_markup=get_balance_keyboard(message.from_user.id), parse_mode="Markdown")
@@ -1151,25 +1203,13 @@ async def handle_cover_upload(callback_query: types.CallbackQuery, state: FSMCon
     await CoverStates.waiting_for_audio_upload.set()
     await bot.send_message(callback_query.from_user.id, text, parse_mode="HTML")
 
-@dp.message_handler(lambda message: message.text == "🎧 Примеры песен и промптов", state='*')
+@dp.message_handler(lambda message: message.text == "❤️ Примеры песен", state='*')
 async def handle_song_examples(message: types.Message, state: FSMContext):
-    # Сбрасываем состояние FSM если пользователь был в процессе генерации
     await state.finish()
     track_first_menu_action(message.from_user.id)
-
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton("🔐 Перейти в секретный канал", url="https://t.me/ALBImusic_chart")
-    )
-
-    text = (
-        "🔐 **Это портал для перехода в наш секретный канал**\n\n"
-        "**«ALBImusic/ Музыка/ Промпты/ Новости/ Обучение»**\n\n"
-        "Там твое вдохновение! Там твоё секретное оружие - идеи! И там же обучение и новости!\n\n"
-        "Жми кнопку ниже! 👇"
-    )
-    
-    await message.answer(text, reply_markup=markup, parse_mode="Markdown")
+    markup.add(InlineKeyboardButton("❤️ Слушать примеры песен", url="https://t.me/ALBImusic_Chart/146"))
+    await message.answer("Слушай треки, созданные нашим ботом 🎵", reply_markup=markup)
 @dp.message_handler(lambda message: message.text == "📄 Документы", state='*')
 async def handle_documents(message: types.Message, state: FSMContext):
     # Сбрасываем состояние FSM если пользователь был в процессе генерации
@@ -1352,11 +1392,7 @@ async def process_song_idea(message: types.Message, state: FSMContext):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await message.answer(
-                "❌ Недостаточно токенов на балансе.\n\nНажмите кнопку 💰 Баланс чтобы пополнить.",
-                reply_markup=get_main_menu_keyboard(user_id)
-            )
-            await state.finish()
+            await send_zero_balance_message(user_id, state)
             return
 
     # Ограничение Suno API: макс 200 символов
@@ -1656,16 +1692,18 @@ async def process_payment(callback_query: types.CallbackQuery):
 
     # Определяем сумму и количество токенов
     payment_data = {
-        'pay_100':  (50,   1,   "1 токен (1 генерация — 2 песни)"),
-        'pay_500':  (250,  10,  "10 токенов (10 генераций — 20 песен)"),
-        'pay_1000': (500,  25,  "25 токенов (25 генераций — 50 песен)"),
-        'pay_2000': (1000, 60,  "60 токенов (60 генераций — 120 песен)"),
-        'pay_4000': (2000, 140, "140 токенов (140 генераций — 280 песен)"),
+        'pay_500':  (490,  10,  "10 генераций (20 треков)"),
+        'pay_1000': (990,  25,  "25 генераций (50 треков)"),
+        'pay_2000': (1990, 60,  "60 генераций (120 треков)"),
+        'pay_4000': (3990, 140, "140 генераций (280 треков)"),
+        'pay_99_novice':  (99, 5, "Пакет «Новичок» (5 генераций — 10 треков)"),
+        'pay_99_weekend': (99, 5, "Пакет «Выходные» (5 генераций — 10 треков)"),
         # Обратная совместимость со старыми кнопками
-        'pay_490':  (250,  10,  "10 токенов"),
-        'pay_990':  (500,  25,  "25 токенов"),
-        'pay_1990': (1000, 60,  "60 токенов"),
-        'pay_3990': (2000, 140, "140 токенов")
+        'pay_100':  (50,   1,   "1 токен"),
+        'pay_490':  (490,  10,  "10 токенов"),
+        'pay_990':  (990,  25,  "25 токенов"),
+        'pay_1990': (1990, 60,  "60 токенов"),
+        'pay_3990': (3990, 140, "140 токенов")
     }
 
     if callback_query.data in payment_data:
@@ -1674,7 +1712,15 @@ async def process_payment(callback_query: types.CallbackQuery):
         await bot.send_message(user_id, "❌ Неизвестный тариф")
         return
 
-    payment = await create_yookassa_payment(user_id, amount, f"Пополнение баланса: {description}")
+    # Определяем тип пакета для метаданных платежа
+    package_type = ''
+    if callback_query.data == 'pay_99_novice':
+        package_type = 'novice'
+    elif callback_query.data == 'pay_99_weekend':
+        package_type = 'weekend'
+
+    extra_meta = {'package_type': package_type} if package_type else None
+    payment = await create_yookassa_payment(user_id, amount, f"Пополнение баланса: {description}", extra_meta)
     if payment and payment.get('confirmation', {}).get('confirmation_url'):
         payment_url = payment['confirmation']['confirmation_url']
         payment_id = payment['id']
@@ -1729,6 +1775,85 @@ async def process_invite_friend(callback_query: types.CallbackQuery):
 Реально круто! ✨"""
     
     await bot.send_message(user_id, ready_text)
+
+# ========================================
+# ПРОВЕРКА ПОДПИСКИ НА КАНАЛ (нулевой баланс)
+# ========================================
+
+@dp.callback_query_handler(lambda c: c.data == 'check_subscription', state='*')
+async def handle_check_subscription(callback_query: types.CallbackQuery, state: FSMContext):
+    """Проверяет подписку пользователя на канал и начисляет 1 токен (один раз)"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+
+    # Проверяем, не использовал ли уже этот бонус
+    try:
+        result = execute_query_sync(
+            "SELECT channel_bonus_used FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        already_used = result and result[0][0]
+    except Exception:
+        already_used = False
+
+    if already_used:
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("💳 Купить пакет генераций", callback_data="go_to_balance")
+        )
+        await bot.send_message(
+            user_id,
+            "⚠️ Бонус за подписку уже был использован.\n\n"
+            "Для продолжения приобрети пакет генераций 👇",
+            reply_markup=markup
+        )
+        return
+
+    # Проверяем реальную подписку через Telegram API
+    is_subscribed = await check_channel_subscription(user_id)
+
+    if is_subscribed:
+        # Начисляем 1 токен и отмечаем бонус использованным
+        try:
+            execute_query_sync(
+                "UPDATE users SET balance = balance + 1, channel_bonus_used = TRUE WHERE user_id = %s",
+                (user_id,)
+            )
+            logging.info(f"✅ Bonus channel token added for user {user_id}")
+        except Exception as e:
+            logging.error(f"❌ Error adding channel bonus for {user_id}: {e}")
+
+        await bot.send_message(
+            user_id,
+            "✅ Вам начислен 1 токен!\n\n"
+            "🎵 Теперь нажмите «Создать песню» и создайте свой первый трек!",
+            reply_markup=get_main_menu_keyboard(user_id)
+        )
+    else:
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("📢 Подписаться на @ALBImusic_Chart", url="https://t.me/ALBImusic_Chart"),
+            InlineKeyboardButton("✅ Я подписался! Давай песню", callback_data="check_subscription"),
+            InlineKeyboardButton("💳 Не хочу подписываться, хочу купить пакет", callback_data="go_to_balance")
+        )
+        await bot.send_message(
+            user_id,
+            "❗ Подписка не обнаружена.\n\n"
+            "Сначала подпишись на канал @ALBImusic_Chart, затем нажми кнопку ниже 👇",
+            reply_markup=markup
+        )
+
+@dp.callback_query_handler(lambda c: c.data == 'go_to_balance', state='*')
+async def handle_go_to_balance(callback_query: types.CallbackQuery, state: FSMContext):
+    """Перенаправляет на раздел Баланс для покупки пакета"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    balance = get_user_balance(user_id)
+    text = (
+        f"💰 *Ваш баланс:* {balance}\n\n"
+        f"💳 *Выбери пакет:*"
+    )
+    await bot.send_message(user_id, text, reply_markup=get_balance_keyboard(user_id), parse_mode="Markdown")
 
 # ========================================
 # INLINE КНОПКИ ПОСЛЕ ОПЛАТЫ
@@ -2587,12 +2712,7 @@ async def start_music_generation(user_id, genre, state: FSMContext, message):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await bot.send_message(
-                user_id,
-                "❌ Недостаточно токенов на балансе.\n\nНажмите кнопку 💰 Баланс чтобы пополнить.",
-                reply_markup=get_main_menu_keyboard(user_id)
-            )
-            await state.finish()
+            await send_zero_balance_message(user_id, state)
             return
         # Списываем генерацию
         execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
@@ -2603,11 +2723,25 @@ async def start_music_generation(user_id, genre, state: FSMContext, message):
 
     # Для инструментальной музыки: БЕЗ текста, только жанр
     # Запускаем Celery задачу (lyrics пустой, custom_mode=False, is_song=False)
-    task = generate_song_task.apply_async(
-        args=(user_id, "", genre, False),  # custom_mode=False для инструментальной
-        kwargs={'task_id': task_id, 'is_song': False},  # is_song=False для инструментальной музыки
-        task_id=task_id
-    )
+    try:
+        task = generate_song_task.apply_async(
+            args=(user_id, "", genre, False),  # custom_mode=False для инструментальной
+            kwargs={'task_id': task_id, 'is_song': False},  # is_song=False для инструментальной музыки
+            task_id=task_id
+        )
+    except Exception as _celery_err:
+        logging.error(f"❌ Ошибка запуска Celery задачи (музыка) для user {user_id}: {_celery_err}")
+        # Возвращаем токен — задача не запустилась
+        if not is_admin(user_id):
+            execute_query_sync("UPDATE users SET balance = balance + 1 WHERE user_id = %s", (user_id,))
+        await state.finish()
+        await bot.send_message(
+            user_id,
+            "❌ Произошла техническая ошибка при запуске генерации.\n\n"
+            "✅ Ваш токен возвращён. Попробуйте ещё раз через несколько минут.",
+            reply_markup=get_main_menu_keyboard(user_id)
+        )
+        return
 
     # Завершаем FSM
     await state.finish()
@@ -2637,12 +2771,7 @@ async def start_song_generation(user_id, lyrics, genre, state: FSMContext, messa
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await bot.send_message(
-                user_id,
-                "❌ Недостаточно токенов на балансе.\n\nНажмите кнопку 💰 Баланс чтобы пополнить.",
-                reply_markup=get_main_menu_keyboard(user_id)
-            )
-            await state.finish()
+            await send_zero_balance_message(user_id, state)
             return
         # Списываем генерацию
         execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
@@ -2655,11 +2784,25 @@ async def start_song_generation(user_id, lyrics, genre, state: FSMContext, messa
     custom_mode = len(lyrics) > 500
 
     # Запускаем Celery задачу (Celery сам создаст запись в БД)
-    task = generate_song_task.apply_async(
-        args=(user_id, lyrics, genre, custom_mode),
-        kwargs={'task_id': task_id},
-        task_id=task_id
-    )
+    try:
+        task = generate_song_task.apply_async(
+            args=(user_id, lyrics, genre, custom_mode),
+            kwargs={'task_id': task_id},
+            task_id=task_id
+        )
+    except Exception as _celery_err:
+        logging.error(f"❌ Ошибка запуска Celery задачи (песня) для user {user_id}: {_celery_err}")
+        # Возвращаем токен — задача не запустилась
+        if not is_admin(user_id):
+            execute_query_sync("UPDATE users SET balance = balance + 1 WHERE user_id = %s", (user_id,))
+        await state.finish()
+        await bot.send_message(
+            user_id,
+            "❌ Произошла техническая ошибка при запуске генерации.\n\n"
+            "✅ Ваш токен возвращён. Попробуйте ещё раз через несколько минут.",
+            reply_markup=get_main_menu_keyboard(user_id)
+        )
+        return
 
     # Завершаем FSM
     await state.finish()
@@ -3723,6 +3866,15 @@ async def process_admin_support(callback_query: types.CallbackQuery, state: FSMC
     await _show_support_messages(callback_query.from_user.id, offset=0)
 
 
+def _escape_md(text: str) -> str:
+    """Экранирует спецсимволы Markdown в пользовательском тексте"""
+    if not text:
+        return text
+    for char in ['_', '*', '`', '[']:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
 async def _show_support_messages(admin_id, offset=0):
     try:
         messages = execute_query_sync(
@@ -3746,8 +3898,12 @@ async def _show_support_messages(admin_id, offset=0):
         status_icon = "✅" if replied else "🔴"
         user_str = f"@{username}" if username else f"id{user_id}"
         date_str = created_at.strftime("%d.%m %H:%M") if created_at else ""
-        header = f"{status_icon} *{first_name}* ({user_str}) — {date_str}"
-        display_text = f"{header}\n\n{text}"
+        # Экранируем пользовательские данные, чтобы Markdown не ломался
+        safe_first_name = _escape_md(str(first_name or "Пользователь"))
+        safe_user_str = _escape_md(user_str)
+        safe_text = _escape_md(str(text or ""))
+        header = f"{status_icon} *{safe_first_name}* ({safe_user_str}) — {date_str}"
+        display_text = f"{header}\n\n{safe_text}"
 
         kb = InlineKeyboardMarkup(row_width=2)
         if not replied:
