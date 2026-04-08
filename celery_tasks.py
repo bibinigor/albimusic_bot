@@ -1110,6 +1110,7 @@ def generate_karaoke_task(self, user_id, original_task_id, version=0, task_id=No
     result_status = 'error'
     result_message = 'Неизвестная ошибка'
     output_audio_url = None
+    _should_refund_on_error = True  # [FIX RETRY-BUG] Возвращать токен только при финальной ошибке
 
     try:
         # Сохраняем задачу
@@ -1241,14 +1242,17 @@ def generate_karaoke_task(self, user_id, original_task_id, version=0, task_id=No
         result_status = 'error'
         result_message = str(e)
 
-        try:
-            self.retry(countdown=30, max_retries=3)
-        except self.MaxRetriesExceededError:
+        # [FIX RETRY-BUG] Токен возвращаем только при финальной ошибке
+        if self.request.retries < 3:
+            _should_refund_on_error = False
+            self.retry(exc=e, countdown=30, max_retries=3)
+        else:
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+            _should_refund_on_error = True
 
     finally:
-        # Возврат токена при ошибке
-        if result_status == 'error':
+        # Возврат токена только при финальной ошибке (не при retry)
+        if result_status == 'error' and _should_refund_on_error:
             try:
                 execute_query_sync(
                     "UPDATE users SET balance = balance + 1 WHERE user_id = %s",
@@ -1306,6 +1310,7 @@ def generate_cover_task(self, user_id, original_task_id, new_style, version=0, t
     audio_url = None
     suno_task_id = None
     suno_audio_id = None
+    _should_refund_on_error = True  # [FIX RETRY-BUG] Возвращать токен только при финальной ошибке
 
     try:
         # Получаем оригинальный текст из БД
@@ -1366,14 +1371,17 @@ def generate_cover_task(self, user_id, original_task_id, new_style, version=0, t
         result_status = 'error'
         result_message = str(e)
 
-        try:
-            self.retry(countdown=30, max_retries=3)
-        except self.MaxRetriesExceededError:
+        # [FIX RETRY-BUG] Токен возвращаем только при финальной ошибке
+        if self.request.retries < 3:
+            _should_refund_on_error = False
+            self.retry(exc=e, countdown=30, max_retries=3)
+        else:
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+            _should_refund_on_error = True
 
     finally:
-        # Возврат токена при ошибке
-        if result_status == 'error':
+        # Возврат токена только при финальной ошибке (не при retry)
+        if result_status == 'error' and _should_refund_on_error:
             try:
                 execute_query_sync(
                     "UPDATE users SET balance = balance + 1 WHERE user_id = %s",
@@ -1482,6 +1490,7 @@ def generate_wav_task(self, user_id, original_task_id, version=0, task_id=None):
     output_wav_url = None
     suno_task_id = None
     suno_audio_id = None
+    _should_refund_on_error = True  # [FIX RETRY-BUG] Возвращать токен только при финальной ошибке
 
     try:
         # Сохраняем задачу
@@ -1608,14 +1617,17 @@ def generate_wav_task(self, user_id, original_task_id, version=0, task_id=None):
         result_status = 'error'
         result_message = str(e)
 
-        try:
-            self.retry(countdown=30, max_retries=3)
-        except self.MaxRetriesExceededError:
+        # [FIX RETRY-BUG] Токен возвращаем только при финальной ошибке
+        if self.request.retries < 3:
+            _should_refund_on_error = False
+            self.retry(exc=e, countdown=30, max_retries=3)
+        else:
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+            _should_refund_on_error = True
 
     finally:
-        # Возврат 2 токенов при ошибке
-        if result_status == 'error':
+        # Возврат 2 токенов только при финальной ошибке (не при retry)
+        if result_status == 'error' and _should_refund_on_error:
             try:
                 execute_query_sync(
                     "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
