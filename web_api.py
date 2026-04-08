@@ -721,6 +721,36 @@ async def get_generation_status(task_id: str, user_id: int = Depends(get_current
                 is_first_generation = (completed_count == 1)
                 response_data["is_demo"] = not is_first_generation
                 response_data["is_first_generation"] = is_first_generation
+
+                # ✅ WEB П4: Начисляем реферальный бонус пригласившему при первой генерации веб-пользователя
+                if is_first_generation:
+                    try:
+                        ref_row = execute_query_sync(
+                            "SELECT referrer_id FROM referrals WHERE referred_id = %s AND bonus_paid = FALSE",
+                            (user_id,)
+                        )
+                        if ref_row:
+                            referrer_id_web = ref_row[0][0]
+                            execute_query_sync(
+                                "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
+                                (referrer_id_web,)
+                            )
+                            execute_query_sync(
+                                """INSERT INTO token_transactions (user_id, amount, transaction_type, description)
+                                   VALUES (%s, %s, %s, %s)""",
+                                (referrer_id_web, 2, 'credit',
+                                 f'Referral bonus: friend {user_id} first web generation')
+                            )
+                            execute_query_sync(
+                                "UPDATE referrals SET bonus_paid = TRUE WHERE referred_id = %s",
+                                (user_id,)
+                            )
+                            logger.info(
+                                f"💰 WEB referral bonus: +2 tokens to {referrer_id_web} "
+                                f"(invited {user_id}, first generation)"
+                            )
+                    except Exception as _ref_e:
+                        logger.warning(f"⚠️ WEB referral bonus error for user {user_id}: {_ref_e}")
             except Exception:
                 response_data["audio_urls"] = [audio_url] if audio_url else []
                 response_data["is_demo"] = True
@@ -1087,7 +1117,7 @@ async def convert_to_wav(request: GenerateWAVRequest, user_id: int = Depends(get
 # ========================
 
 class CreatePaymentRequest(BaseModel):
-    amount: float  # Сумма в рублях (50, 250, 500, 1000, 2000)
+    amount: float  # Сумма в рублях (99, 50, 250, 500, 1000, 2000)
 
 class PaymentWebhookEvent(BaseModel):
     type: str
@@ -1137,6 +1167,7 @@ async def create_payment(request: CreatePaymentRequest, user_id: int = Depends(g
         
         # Определяем количество токенов по сумме
         pricing_map = {
+            99: 5,     # 🎁 стартовый пакет — выгоднее всего для первой покупки
             50: 1,
             250: 10,
             500: 25,
@@ -1353,69 +1384,31 @@ async def register_referral(ref_code: str, user_id: int = Depends(get_current_us
                 "message": "User already has a referrer"
             })
         
-        # Создаем реферальную связь
+        # ✅ Создаем реферальную связь с bonus_paid=FALSE
+        # Бонус будет начислен автоматически когда приглашённый сделает первую генерацию
         execute_query_sync(
             """
             INSERT INTO referrals (referrer_id, referred_id, bonus_paid)
-            VALUES (%s, %s, TRUE)
+            VALUES (%s, %s, FALSE)
             """,
             (referrer_id, user_id)
         )
-        
-        # Начисляем 2 токена рефереру
+
+        # Обновляем invited_by у нового пользователя
         execute_query_sync(
-            """
-            UPDATE users
-            SET balance = balance + 2
-            WHERE user_id = %s
-            """,
-            (referrer_id,)
+            "UPDATE users SET invited_by = %s WHERE user_id = %s AND invited_by IS NULL",
+            (referrer_id, user_id)
         )
-        
-        # Логируем транзакцию
-        execute_query_sync(
-            """
-            INSERT INTO token_transactions (user_id, amount, transaction_type, description)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (referrer_id, 2, 'credit', f'Referral bonus for user {user_id}')
+
+        logger.info(
+            f"✅ Referral registered (deferred bonus): referrer={referrer_id}, referred={user_id}. "
+            f"Bonus will be awarded after first generation."
         )
-        
-        # Проверяем, не 5-й ли это друг (бонус +5 токенов)
-        referral_count_result = execute_query_sync(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id = %s",
-            (referrer_id,)
-        )
-        
-        if referral_count_result and referral_count_result[0][0] == 5:
-            # Начисляем бонус за 5-го друга
-            execute_query_sync(
-                """
-                UPDATE users
-                SET balance = balance + 5,
-                    referral_bonus_given = TRUE
-                WHERE user_id = %s
-                """,
-                (referrer_id,)
-            )
-            
-            # Логируем бонусную транзакцию
-            execute_query_sync(
-                """
-                INSERT INTO token_transactions (user_id, amount, transaction_type, description)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (referrer_id, 5, 'credit', 'Bonus for 5th referral')
-            )
-            
-            logger.info(f"🎁 5th referral bonus awarded: user={referrer_id}")
-        
-        logger.info(f"✅ Referral registered: referrer={referrer_id}, referred={user_id}")
-        
+
         return JSONResponse({
             "success": True,
-            "message": "Referral registered successfully",
-            "tokens_awarded": 2
+            "message": "Referral registered. Bonus will be awarded after friend's first generation.",
+            "tokens_awarded": 0  # бонус отложен
         })
     
     except HTTPException:

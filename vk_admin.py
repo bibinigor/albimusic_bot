@@ -241,7 +241,7 @@ def close_support_message(msg_id: int) -> bool:
 
 def get_all_user_ids() -> List[int]:
     """
-    Получить список всех user_id для рассылки
+    Получить список всех user_id для рассылки (все платформы)
     
     Returns:
         Список user_id
@@ -251,6 +251,25 @@ def get_all_user_ids() -> List[int]:
         return [row[0] for row in rows]
     except Exception as e:
         logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+        return []
+
+
+def get_vk_user_ids() -> List[int]:
+    """
+    Получить список user_id только VK-пользователей для рассылки через VK-бот.
+    Фильтрует по полю provider = 'vk', которое устанавливается при регистрации
+    через VK-бота.
+
+    Returns:
+        Список user_id пользователей VK
+    """
+    try:
+        rows = execute_query_sync(
+            "SELECT user_id FROM users WHERE provider = 'vk'"
+        )
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения списка VK-пользователей: {e}")
         return []
 
 

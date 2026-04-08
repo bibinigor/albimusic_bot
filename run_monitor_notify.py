@@ -304,61 +304,122 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
         is_first_generation = (completed_count == 1)
 
         if is_first_generation:
-            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ПОЛНУЮ версию бесплатно")
-            header = "🎤 Ваша первая песня готова!" if is_song else "🎵 Ваша первая музыка готова!"
-            header += "\n\n🎁 Первая генерация — подарок от ALBI Music!"
+            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ДЕМО 60 сек + предложение разблокировки за 50₽")
+            header = "🎤 Ваша первая песня готова! 🎁" if is_song else "🎵 Ваша первая музыка готова! 🎁"
             await bot.send_message(chat_id=user_id, text=header, parse_mode="Markdown")
 
+            # Отправляем 60-секундное демо (без полного трека)
+            demo_paths = []
             for idx, url in enumerate(audio_urls[:2], 1):
                 try:
-                    await bot.send_audio(
-                        chat_id=user_id,
-                        audio=url,
-                        caption=f"🎼 Полная версия {idx}",
-                        title=f"AI Music Full v{idx}",
-                        performer="ALBI Music"
-                    )
-                    logger.info(f"✅ Полная версия {idx}/2 отправлена user {user_id} (первая генерация)")
+                    demo_path = await download_and_cut_audio(url, duration=60)
+                    if demo_path:
+                        with open(demo_path, 'rb') as audio_file:
+                            await bot.send_audio(
+                                chat_id=user_id,
+                                audio=audio_file,
+                                caption=f"🎼 Демо — Версия {idx} (60 сек)",
+                                title=f"AI Music Demo v{idx}",
+                                performer="ALBI Music"
+                            )
+                        demo_paths.append(demo_path)
+                        logger.info(f"✅ Демо {idx}/2 отправлено user {user_id} (первая генерация)")
+                    else:
+                        logger.error(f"❌ Не удалось создать демо {idx} для первой генерации user {user_id}")
                 except Exception as e:
-                    logger.error(f"❌ Ошибка отправки полной версии {idx}: {e}")
+                    logger.error(f"❌ Ошибка отправки демо {idx} (первая генерация): {e}")
 
-            # Сохраняем как разблокированное
+            # Сохраняем в demo_tracks как НЕ разблокированное
             try:
                 execute_query_sync(
                     """INSERT INTO demo_tracks (task_id, user_id, full_url_1, full_url_2, is_unlocked)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (task_id) DO UPDATE SET is_unlocked = true""",
-                    (task_id, user_id, audio_urls[0], audio_urls[1] if len(audio_urls) > 1 else audio_urls[0], True)
+                    ON CONFLICT (task_id) DO NOTHING""",
+                    (task_id, user_id, audio_urls[0], audio_urls[1] if len(audio_urls) > 1 else audio_urls[0], False)
                 )
+                logger.info(f"💾 Первая генерация сохранена в demo_tracks (unlocked=False): {task_id}")
             except Exception as e:
-                logger.error(f"❌ Ошибка сохранения первой генерации: {e}")
+                logger.error(f"❌ Ошибка сохранения первой генерации в demo_tracks: {e}")
 
-            # Отправляем сообщение о токенах и приглашении
-            referral_link = f"https://t.me/AlBimusic_bot?start=ref_{user_id}"
+            # ✅ TG П4: Начисляем реферальный бонус пригласившему при первой генерации
+            try:
+                ref_row = execute_query_sync(
+                    "SELECT referrer_id FROM referrals WHERE referred_id = %s AND bonus_applied = FALSE",
+                    (user_id,)
+                )
+                if ref_row:
+                    referrer_id_tg = ref_row[0][0]
+                    execute_query_sync(
+                        "UPDATE users SET balance = balance + 2 WHERE user_id = %s",
+                        (referrer_id_tg,)
+                    )
+                    execute_query_sync(
+                        """INSERT INTO token_transactions (user_id, amount, transaction_type, description)
+                           VALUES (%s, %s, %s, %s)""",
+                        (referrer_id_tg, 2, 'credit',
+                         f'Referral bonus: TG friend {user_id} first generation')
+                    )
+                    execute_query_sync(
+                        "UPDATE referrals SET bonus_applied = TRUE WHERE referred_id = %s",
+                        (user_id,)
+                    )
+                    logger.info(
+                        f"💰 TG referral bonus: +2 tokens to {referrer_id_tg} "
+                        f"(invited {user_id}, first TG generation)"
+                    )
+            except Exception as _ref_e:
+                logger.warning(f"⚠️ TG referral bonus error for user {user_id}: {_ref_e}")
+
+            # Кнопки: только «Послушать» и «Разблокировать за 50₽» — без «Скачать» и прочих функций
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🎤 Минусовка (1 токен)", callback_data=f"karaoke_{task_id}"),
-                    InlineKeyboardButton(text="🎸 Кавер (1 токен)", callback_data=f"cover_{task_id}")
-                ],
-                [
-                    InlineKeyboardButton(text="🎵 В WAV (2 токена)", callback_data=f"wav_{task_id}"),
-                    InlineKeyboardButton(text="📢 Отправить в канал", callback_data=f"post_{task_id}")
-                ],
-                [InlineKeyboardButton(text="💰 Купить токены", callback_data="show_balance")],
-                [InlineKeyboardButton(text="🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")]
+                [InlineKeyboardButton(
+                    text="🔓 Получить ПОЛНУЮ версию — 50₽",
+                    callback_data=f"pay_unlock_50_{task_id}"
+                )],
+                [InlineKeyboardButton(
+                    text="🎧 Послушать ещё раз",
+                    callback_data=f"play_{task_id}"
+                )],
+                [InlineKeyboardButton(
+                    text="🔔 Перейти в канал",
+                    url="https://t.me/ALBImusic_Chart"
+                )]
             ])
             await bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "🎁 *Первый токен использован!*\n\n"
-                    "Чтобы создать ещё песни:\n"
-                    "💰 *Купить токены* — в меню Баланс\n"
-                    "🤝 *Пригласить друга* — получи **2 токена** бесплатно!\n\n"
-                    f"🔗 Твоя реферальная ссылка:\n`{referral_link}`"
+                    "🎧 *Это демо твоей первой песни (60 секунд)*\n\n"
+                    "⚠️ Это только Preview — полная версия длиннее!\n\n"
+                    "🔓 *Разблокируй полную версию за 50₽:*\n"
+                    "• Оба трека без ограничений по времени\n"
+                    "• Кнопки «Послушать» и «Скачать»\n"
+                    "• Минусовка, Кавер, WAV и многое другое\n\n"
+                    "👇 Нажми кнопку ниже:"
                 ),
                 reply_markup=keyboard,
                 parse_mode="Markdown"
             )
+
+            # ✅ Планируем оффер «Новичок» через 3 мин (резерв)
+            try:
+                execute_query_sync(
+                    "UPDATE users SET novice_offer_pending_at = NOW() "
+                    "WHERE user_id = %s AND novice_offer_pending_at IS NULL "
+                    "AND (novice_offer_sent IS NULL OR novice_offer_sent = FALSE)",
+                    (user_id,)
+                )
+                logger.info(f"⏰ Оффер «Новичок» запланирован для user {user_id}")
+            except Exception as _ne:
+                logger.warning(f"⚠️ Ошибка планирования оффера для {user_id}: {_ne}")
+
+            # Очищаем временные демо файлы
+            for demo_path in demo_paths:
+                try:
+                    if os.path.exists(demo_path):
+                        os.remove(demo_path)
+                        logger.info(f"🗑️ Удален временный файл: {demo_path}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка удаления {demo_path}: {e}")
 
             await bot.close()
             return True
@@ -495,15 +556,24 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
             )]
         ])
 
+        # ✅ Соц. доказательство в DEMO-пейволле
+        try:
+            _tu_tg = execute_query_sync("SELECT COUNT(*) FROM users")
+            _total_tg = _tu_tg[0][0] if _tu_tg else 658
+        except Exception:
+            _total_tg = 658
         await bot.send_message(
             chat_id=user_id,
-            text="💎 **Что можно сделать с этой песней:**\n\n" +
-                 "🔓 **Разблокировать** — получи полные версии без ограничений\n" +
-                 "🎤 **Минусовка** — версия без вокала для исполнения\n" +
-                 "🎸 **Кавер** — перепой в другом стиле/жанре\n" +
-                 "🎵 **В WAV** — конвертируй в WAV формат для профи\n" +
-                 "📢 **Отправить в канал** — опубликуй в нашем официальном канале\n" +
-                 "🔗 **Поделиться** — отправь другу и получи 1 ТОКЕН БЕСПЛАТНО! 🎁",
+            text=(
+                f"🎵 Уже *{_total_tg}+* музыкантов создают треки в ALBI Music!\n\n"
+                "💎 **Что можно сделать с этой песней:**\n\n"
+                "🔓 **Разблокировать** — получи полные версии (1 токен)\n"
+                "🎤 **Минусовка** — версия без вокала для исполнения\n"
+                "🎸 **Кавер** — перепой в другом стиле/жанре\n"
+                "🎵 **В WAV** — конвертируй в WAV формат для профи\n"
+                "📢 **Отправить в канал** — опубликуй в нашем канале\n"
+                "🔗 **Поделиться** — отправь другу и получи 1 ТОКЕН БЕСПЛАТНО! 🎁"
+            ),
             reply_markup=keyboard,
             parse_mode="Markdown"
         )
@@ -520,7 +590,31 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
             logger.info(f"💾 Сохранено в demo_tracks: {task_id}")
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения в demo_tracks: {e}")
-        
+
+        # === АВТООФФЕР НОВИЧКУ ===
+        # Проверяем: это первая генерация у пользователя?
+        try:
+            gen_count_result = execute_query_sync(
+                "SELECT COUNT(*) FROM generations WHERE user_id = %s AND status = 'completed'",
+                (user_id,)
+            )
+            gen_count = gen_count_result[0][0] if gen_count_result else 0
+            novice_check = execute_query_sync(
+                "SELECT novice_offer_sent FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            novice_sent = novice_check and novice_check[0][0]
+
+            if gen_count == 1 and not novice_sent:
+                # Планируем оффер через 3 минуты — записываем текущее время
+                execute_query_sync(
+                    "UPDATE users SET novice_offer_pending_at = NOW() WHERE user_id = %s AND novice_offer_pending_at IS NULL",
+                    (user_id,)
+                )
+                logger.info(f"⏰ Запланирован оффер «Новичок» для user {user_id} через 3 мин")
+        except Exception as _e:
+            logger.error(f"❌ Ошибка планирования оффера новичку {user_id}: {_e}")
+
         # Очищаем временные демо файлы
         for demo_path in demo_paths:
             try:
@@ -561,6 +655,60 @@ async def send_error_notification(user_id, task_id, prompt=None):
         logger.error(f"❌ Ошибка отправки уведомления об ошибке user {user_id}: {e}")
         return False
 
+
+
+async def send_novice_offer(user_id: int):
+    """Отправляет предложение пакета «Новичок» через 3 минуты после первой песни"""
+    try:
+        from aiogram import Bot
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("⏳ Забрать 5 треков за 99₽", callback_data="pay_99_novice")
+        )
+        await bot.send_message(
+            user_id,
+            "⚡️ Поздравляю! Ты создал свой первый хит! Тебе понравилось?\n\n"
+            "Обычно наши пользователи не могут остановиться на одной песне 😅  "
+            "Пока ты здесь, держи секретное предложение, которое сгорит через 60 минут. "
+            "Это одноразовое предложение и его больше не будет никогда:\n\n"
+            "🎁 Скрытый Пакет «Новичок» (5 полных треков) всего за 99₽ (вместо 250₽).\n"
+            "Хватит, чтобы сделать трек про друга (подругу), признаться в любви, "
+            "поздравить маму или просто поржать!\n"
+            "👇 Жми на кнопку, пока таймер не истёк!",
+            reply_markup=markup
+        )
+        # Отмечаем оффер как отправленный
+        execute_query_sync(
+            "UPDATE users SET novice_offer_sent = TRUE, novice_offer_pending_at = NULL WHERE user_id = %s",
+            (user_id,)
+        )
+        logger.info(f"✅ Оффер «Новичок» отправлен пользователю {user_id}")
+        await bot.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки оффера «Новичок» для {user_id}: {e}")
+        return False
+
+
+async def check_and_send_novice_offers():
+    """Проверяет пользователей с pending-оффером >= 3 мин и отправляет им предложение «Новичок»"""
+    try:
+        pending = execute_query_sync(
+            """SELECT user_id FROM users
+               WHERE novice_offer_pending_at IS NOT NULL
+               AND (novice_offer_sent IS NULL OR novice_offer_sent = FALSE)
+               AND NOW() - novice_offer_pending_at >= interval '3 minutes'
+               LIMIT 10"""
+        )
+        if pending:
+            for (uid,) in pending:
+                await send_novice_offer(uid)
+                await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.error(f"❌ Ошибка check_and_send_novice_offers: {e}")
 
 
 async def check_and_clean_duplicates():
@@ -686,6 +834,9 @@ async def monitor_generations():
                 sent_notifications = set(list(sent_notifications)[-50:])
                 logger.info(f"🧹 Очищены старые уведомления, осталось: {len(sent_notifications)}")
             
+            # Проверяем отложенные офферы для новичков (через 3 мин после первой песни)
+            await check_and_send_novice_offers()
+
             # Пауза между проверками
             await asyncio.sleep(10)
             

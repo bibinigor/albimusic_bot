@@ -423,29 +423,19 @@ class VKBot:
                                 "INSERT INTO referrals (referrer_id, referred_id, bonus_applied) SELECT %s, %s, FALSE WHERE NOT EXISTS (SELECT 1 FROM referrals WHERE referred_id = %s)",
                                 (int(referrer_id), user_id, user_id)
                             )
-                            # Начисляем 2 токена VK-рефереру
-                            rows_updated = execute_query_sync(
-                                "UPDATE users SET balance = balance + 2 WHERE user_id = %s AND provider = 'vk'",
-                                (int(referrer_id),)
+                            # ✅ Бонус НЕ начисляется сразу при регистрации.
+                            # bonus_applied=FALSE → _award_referral_bonus() выдаст +2 токена
+                            # автоматически, как только приглашённый создаст первую песню.
+                            logger.info(f"🔗 Реферал VK: {user_id} → {referrer_id}. Бонус начислится после первой генерации друга.")
+                            # Уведомляем пригласившего о регистрации друга (без токенов — пока)
+                            self.send_message(
+                                user_id=int(referrer_id),
+                                message=(
+                                    "🎉 Ваш друг присоединился к ALBI Music!\n\n"
+                                    "🎵 Как только он создаст первую песню — вы получите "
+                                    "+2 токена автоматически! 🚀"
+                                )
                             )
-                            if rows_updated and rows_updated > 0:
-                                # Помечаем бонус как выплаченный ТОЛЬКО если UPDATE прошёл успешно
-                                execute_query_sync(
-                                    "UPDATE referrals SET bonus_applied = TRUE WHERE referred_id = %s",
-                                    (user_id,)
-                                )
-                                logger.info(f"🔗 Реферал VK: {user_id} → {referrer_id}. +2 токена начислено VK-рефереру, bonus_applied=TRUE")
-                                # Уведомляем пригласившего через VK
-                                self.send_message(
-                                    user_id=int(referrer_id),
-                                    message=(
-                                        "🎉 Ваш друг присоединился к ALBI Music!\n\n"
-                                        "💰 Вам начислено +2 токена за приглашение друга.\n"
-                                        "Продолжайте приглашать — за каждого получаете 2 токена! 🚀"
-                                    )
-                                )
-                            else:
-                                logger.warning(f"⚠️ Реферал VK: UPDATE баланса VK-реферера {referrer_id} затронул 0 строк!")
                         else:
                             logger.warning(f"⚠️ Реферал VK: реферер {referrer_id} не найден как VK-пользователь — бонус пропущен.")
                     except Exception as ref_e:
@@ -651,7 +641,22 @@ class VKBot:
             user_id = getattr(event, 'user_id', 0)
             text = getattr(event, 'text', '') or ''
         text_lower = text.lower()  # Приводим к нижнему регистру сразу
-        
+
+        # ============================================================
+        # РЕЖИМ ТЕХНИЧЕСКОГО ОБСЛУЖИВАНИЯ
+        # Установите MAINTENANCE_MODE = False когда сервис восстановлен
+        # ============================================================
+        MAINTENANCE_MODE = False
+        if MAINTENANCE_MODE and user_id not in ADMIN_IDS:
+            self.send_message(
+                user_id,
+                "🔧 Бот находится на техническом обслуживании\n\n"
+                "Мы работаем над улучшением сервиса и скоро вернёмся!\n\n"
+                "Приносим извинения за временные неудобства 🙏\n\n"
+                "Следите за обновлениями в нашем сообществе VK."
+            )
+            return
+
         # Логируем все входящие сообщения до любой обработки
         logger.info(f"📩 Получено новое сообщение от {user_id}: '{text}' (в нижнем регистре: '{text_lower}')")
         print(f"Получено сообщение: {text}")
@@ -1736,10 +1741,18 @@ class VKBot:
                                     'INSERT INTO generations (user_id, task_id, prompt, audio_url, is_free, custom_mode, suno_task_id, suno_audio_id, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
                                     (user_id, db_task_id, style, audio_url, False, use_custom_mode, suno_task_id, suno_audio_id, 'completed')
                                 )
-                                
+
+                                # Проверяем: первая ли генерация пользователя (count=1 значит только что добавленная)
+                                _first_gen_check_vk = execute_query_sync(
+                                    "SELECT COUNT(*) FROM generations WHERE user_id = %s AND status = 'completed'",
+                                    (user_id,)
+                                )
+                                _completed_count_vk = _first_gen_check_vk[0][0] if _first_gen_check_vk and _first_gen_check_vk[0] else 0
+                                _is_first_vk_gen = (_completed_count_vk == 1)
+
                                 # Импортируем клавиатуру с опциями
                                 from vk_keyboards import get_song_options_keyboard
-                                
+
                                 # Подготовка сообщения с результатом
                                 message_text = f"✅ Ваша песня готова!\n\n🎵 Жанр: {genre}\n\n"
                                 
@@ -1769,8 +1782,77 @@ class VKBot:
                                     keyboard=song_keyboard
                                 )
                                 
-                                # Отправляем отдельное сообщение с опциями (минусовка, кавер и т.д.)
-                                if suno_task_id:
+                                # Для первой генерации — демо + оффер 50₽ вместо опций
+                                if _is_first_vk_gen:
+                                    # Сохраняем в demo_tracks как НЕ разблокированное
+                                    try:
+                                        _urls_demo = json.loads(audio_url) if isinstance(audio_url, str) and audio_url.startswith('[') else [str(audio_url)]
+                                        _full_url_1 = _urls_demo[0] if len(_urls_demo) > 0 else str(audio_url)
+                                        _full_url_2 = _urls_demo[1] if len(_urls_demo) > 1 else _full_url_1
+                                        execute_query_sync(
+                                            """INSERT INTO demo_tracks (task_id, user_id, full_url_1, full_url_2, is_unlocked)
+                                            VALUES (%s, %s, %s, %s, %s)
+                                            ON CONFLICT (task_id) DO NOTHING""",
+                                            (db_task_id, user_id, _full_url_1, _full_url_2, False)
+                                        )
+                                        logger.info(f"💾 VK первая генерация сохранена в demo_tracks: {db_task_id}")
+                                    except Exception as _demo_err:
+                                        logger.error(f"❌ Ошибка сохранения VK первой генерации в demo_tracks: {_demo_err}")
+
+                                    # Создаём платёж YooKassa 50₽ для разблокировки опций
+                                    _unlock_url = None
+                                    try:
+                                        from yookassa import Configuration, Payment as _YooPayment
+                                        import uuid as _uuid_vk
+                                        from vk_config import YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY
+                                        Configuration.account_id = YOOKASSA_SHOP_ID
+                                        Configuration.secret_key = YOOKASSA_SECRET_KEY
+                                        _idempotence_key = str(_uuid_vk.uuid4())
+                                        _unlock_payment = _YooPayment.create({
+                                            "amount": {"value": "50.00", "currency": "RUB"},
+                                            "confirmation": {
+                                                "type": "redirect",
+                                                "return_url": "https://vk.com/club235442407"
+                                            },
+                                            "capture": True,
+                                            "description": "Разблокировка полной версии трека ALBI Music",
+                                            "metadata": {
+                                                "user_id": str(user_id),
+                                                "payment_type": "unlock_first",
+                                                "task_id": db_task_id,
+                                                "platform": "vk"
+                                            }
+                                        }, _idempotence_key)
+                                        _unlock_url = _unlock_payment.confirmation.confirmation_url
+                                        logger.info(f"💳 Создан платёж unlock_first для VK user {user_id}: {_unlock_payment.id}")
+                                    except Exception as _pay_err:
+                                        logger.error(f"❌ Ошибка создания платежа unlock_first VK: {_pay_err}")
+
+                                    # Отправляем предупреждение о демо и оффер 50₽
+                                    _demo_msg = (
+                                        "⚠️ Это демо-версия твоей первой песни.\n\n"
+                                        "🔓 Разблокируй ПОЛНЫЕ функции за 50₽:\n"
+                                        "• Минусовка — версия без вокала\n"
+                                        "• Кавер — перепой в другом жанре\n"
+                                        "• В WAV — профессиональный формат\n"
+                                        "• Поделиться — опубликовать трек\n\n"
+                                        "👇 Нажми кнопку для оплаты:"
+                                    )
+                                    if _unlock_url:
+                                        from vk_keyboards import get_payment_keyboard
+                                        self.send_message(
+                                            user_id=user_id,
+                                            message=_demo_msg,
+                                            keyboard=get_payment_keyboard(_unlock_url)
+                                        )
+                                    else:
+                                        self.send_message(
+                                            user_id=user_id,
+                                            message=_demo_msg + "\n\nДля оплаты перейдите в раздел «Баланс»."
+                                        )
+
+                                # Для обычных пользователей — показываем опции (минусовка и т.д.)
+                                elif suno_task_id:
                                     options_text = (
                                         "💎 Что можно сделать с этой песней:\n\n"
                                         "🎤 Минусовка — версия без вокала\n"
@@ -1778,7 +1860,7 @@ class VKBot:
                                         "🎵 В WAV — конвертация в WAV формат\n"
                                         "🔗 Поделиться — опубликовать трек"
                                     )
-                                    
+
                                     self.send_message(
                                         user_id=user_id,
                                         message=options_text,
@@ -1792,6 +1874,9 @@ class VKBot:
                                 )
                                 logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
 
+                                # ✅ Начисляем реферальный бонус пригласившему (если это первая генерация)
+                                self._award_referral_bonus(user_id)
+
                                 # Помечаем в БД как уже доставленное (чтобы Telegram-монитор не отправил дубль)
                                 try:
                                     execute_query_sync(
@@ -1800,29 +1885,41 @@ class VKBot:
                                     )
                                 except Exception as mark_err:
                                     logger.warning(f"⚠️ Не удалось пометить генерацию как отправленную: {mark_err}")
-                                
-                                # Проверяем баланс после списания — если 0, предлагаем купить или пригласить
+
+                                # ✅ Upsell после результата — показывать ВСЕГДА (пока эмоции свежи)
                                 try:
                                     bal_result = execute_query_sync(
                                         "SELECT balance FROM users WHERE user_id = %s", (user_id,)
                                     )
                                     new_balance = bal_result[0][0] if bal_result and bal_result[0] else 0
+                                    total_users_res = execute_query_sync("SELECT COUNT(*) FROM users")
+                                    total_users = total_users_res[0][0] if total_users_res else 658
+                                    from vk_keyboards import get_buy_more_keyboard
                                     if new_balance <= 0:
-                                        from vk_keyboards import get_balance_actions_keyboard
-                                        buy_kb = get_balance_actions_keyboard()
+                                        # Токены закончились — сильный пейволл с соц. доказательством
                                         self.send_message(
                                             user_id=user_id,
                                             message=(
-                                                "🔔 Ваш токен использован!\n\n"
-                                                "Чтобы создать ещё песни:\n"
-                                                "💰 Купите токены — нажмите кнопку «Баланс»\n"
-                                                "🤝 Пригласите друга — получите 2 токена бесплатно!\n\n"
-                                                f"🔗 Ваша реферальная ссылка:\nhttps://vk.me/albi_music?ref={user_id}"
+                                                f"🎵 Понравилось? Уже {total_users}+ музыкантов создают треки в ALBI!\n\n"
+                                                "⚠️ Токены закончились. Пополните баланс:\n"
+                                                "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                                "💳 10 треков — 250₽\n\n"
+                                                "🤝 Или пригласите друга — получите 2 токена бесплатно!"
                                             ),
-                                            keyboard=buy_kb
+                                            keyboard=get_buy_more_keyboard()
+                                        )
+                                    else:
+                                        # Баланс есть — лёгкий upsell
+                                        self.send_message(
+                                            user_id=user_id,
+                                            message=(
+                                                f"💡 Осталось токенов: {new_balance} | "
+                                                "Пополните заранее — чтобы не прерываться на вдохновении!"
+                                            ),
+                                            keyboard=get_buy_more_keyboard()
                                         )
                                 except Exception as bal_err:
-                                    logger.warning(f"⚠️ Ошибка проверки баланса после генерации: {bal_err}")
+                                    logger.warning(f"⚠️ Ошибка upsell после генерации: {bal_err}")
                             else:
                                 # Если не удалось сгенерировать песню
                                 self.send_message(
@@ -2217,6 +2314,40 @@ class VKBot:
                             (user_id,)
                         )
                         logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
+
+                        # ✅ Реферальный бонус (если первая генерация приглашённого)
+                        self._award_referral_bonus(user_id)
+
+                        # ✅ Upsell после результата
+                        try:
+                            _b = execute_query_sync("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+                            _nb = _b[0][0] if _b and _b[0] else 0
+                            _tu = execute_query_sync("SELECT COUNT(*) FROM users")
+                            _total = _tu[0][0] if _tu else 658
+                            from vk_keyboards import get_buy_more_keyboard
+                            if _nb <= 0:
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=(
+                                        f"🎵 Понравилось? Уже {_total}+ музыкантов создают треки в ALBI!\n\n"
+                                        "⚠️ Токены закончились. Пополните баланс:\n"
+                                        "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                        "💳 10 треков — 250₽\n\n"
+                                        "🤝 Или пригласите друга — получите 2 токена бесплатно!"
+                                    ),
+                                    keyboard=get_buy_more_keyboard()
+                                )
+                            else:
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=(
+                                        f"💡 Осталось токенов: {_nb} | "
+                                        "Пополните заранее — чтобы не прерываться на вдохновении!"
+                                    ),
+                                    keyboard=get_buy_more_keyboard()
+                                )
+                        except Exception as _ue:
+                            logger.warning(f"⚠️ Ошибка upsell после генерации музыки: {_ue}")
                     except Exception as e:
                         logger.error(f"❌ Ошибка списания баланса: {e}")
                 else:
@@ -2335,6 +2466,42 @@ class VKBot:
                             (user_id,)
                         )
                         logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
+
+                        # ✅ Начисляем реферальный бонус (если это первая генерация приглашённого)
+                        self._award_referral_bonus(user_id)
+
+                        # ✅ Upsell после результата — показывать ВСЕГДА
+                        try:
+                            bal_res2 = execute_query_sync(
+                                "SELECT balance FROM users WHERE user_id = %s", (user_id,)
+                            )
+                            new_bal2 = bal_res2[0][0] if bal_res2 and bal_res2[0] else 0
+                            total_u2 = execute_query_sync("SELECT COUNT(*) FROM users")
+                            total_users2 = total_u2[0][0] if total_u2 else 658
+                            from vk_keyboards import get_buy_more_keyboard
+                            if new_bal2 <= 0:
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=(
+                                        f"🎵 Понравилось? Уже {total_users2}+ музыкантов создают треки в ALBI!\n\n"
+                                        "⚠️ Токены закончились. Пополните баланс:\n"
+                                        "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                        "💳 10 треков — 250₽\n\n"
+                                        "🤝 Или пригласите друга — получите 2 токена бесплатно!"
+                                    ),
+                                    keyboard=get_buy_more_keyboard()
+                                )
+                            else:
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=(
+                                        f"💡 Осталось токенов: {new_bal2} | "
+                                        "Пополните заранее — чтобы не прерываться на вдохновении!"
+                                    ),
+                                    keyboard=get_buy_more_keyboard()
+                                )
+                        except Exception as upsell_e:
+                            logger.warning(f"⚠️ Ошибка upsell после генерации: {upsell_e}")
                     except Exception as e:
                         logger.error(f"❌ Ошибка списания баланса: {e}")
                 else:
@@ -2474,6 +2641,9 @@ class VKBot:
                 )
                 logger.info(f"💰 Списан 1 токен с баланса пользователя {user_id}")
 
+                # ✅ Реферальный бонус (если первая генерация приглашённого)
+                self._award_referral_bonus(user_id)
+
                 try:
                     execute_query_sync(
                         "UPDATE generations SET audio_url = %s WHERE task_id = %s",
@@ -2482,27 +2652,38 @@ class VKBot:
                 except Exception as mark_err:
                     logger.warning(f"⚠️ Не удалось пометить генерацию как отправленную: {mark_err}")
 
+                # ✅ Upsell после результата — ВСЕГДА (пока эмоции свежи)
                 try:
                     bal_result = execute_query_sync(
                         "SELECT balance FROM users WHERE user_id = %s", (user_id,)
                     )
                     new_balance = bal_result[0][0] if bal_result and bal_result[0] else 0
+                    total_users_res3 = execute_query_sync("SELECT COUNT(*) FROM users")
+                    total_users3 = total_users_res3[0][0] if total_users_res3 else 658
+                    from vk_keyboards import get_buy_more_keyboard
                     if new_balance <= 0:
-                        from vk_keyboards import get_balance_actions_keyboard
-                        buy_kb = get_balance_actions_keyboard()
                         self.send_message(
                             user_id=user_id,
                             message=(
-                                "🔔 Ваш токен использован!\n\n"
-                                "Чтобы создать ещё песни:\n"
-                                "💰 Купите токены — нажмите кнопку «Баланс»\n"
-                                "🤝 Пригласите друга — получите 2 токена бесплатно!\n\n"
-                                f"🔗 Ваша реферальная ссылка:\nhttps://vk.me/albi_music?ref={user_id}"
+                                f"🎵 Понравилось? Уже {total_users3}+ музыкантов создают треки в ALBI!\n\n"
+                                "⚠️ Токены закончились. Пополните баланс:\n"
+                                "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                "💳 10 треков — 250₽\n\n"
+                                "🤝 Или пригласите друга — получите 2 токена бесплатно!"
                             ),
-                            keyboard=buy_kb
+                            keyboard=get_buy_more_keyboard()
+                        )
+                    else:
+                        self.send_message(
+                            user_id=user_id,
+                            message=(
+                                f"💡 Осталось токенов: {new_balance} | "
+                                "Пополните заранее — чтобы не прерываться на вдохновении!"
+                            ),
+                            keyboard=get_buy_more_keyboard()
                         )
                 except Exception as bal_err:
-                    logger.warning(f"⚠️ Ошибка проверки баланса после генерации: {bal_err}")
+                    logger.warning(f"⚠️ Ошибка upsell после генерации: {bal_err}")
             else:
                 self.send_message(
                     user_id=user_id,

@@ -859,6 +859,7 @@ def generate_music_task(self, user_id, prompt, task_id=None):
     audio_url = None
     suno_task_id = None
     suno_audio_id = None
+    _should_refund_on_error = True  # [FIX RETRY-BUG] Возвращать токен только при финальной ошибке
 
     try:
         # 1. СОХРАНЕНИЕ НАЧАЛА ЗАДАЧИ
@@ -903,11 +904,13 @@ def generate_music_task(self, user_id, prompt, task_id=None):
         result_status = 'error'
         result_message = str(e)
         
-        # Пытаемся повторить задачу (максимум 3 раза)
-        try:
-            self.retry(countdown=30, max_retries=3)
-        except self.MaxRetriesExceededError:
+        # [FIX RETRY-BUG] Пытаемся повторить задачу, НО токен возвращаем только при финальной ошибке
+        if self.request.retries < 3:
+            _should_refund_on_error = False  # Промежуточная попытка — НЕ возвращать токен
+            self.retry(exc=e, countdown=30, max_retries=3)
+        else:
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+            _should_refund_on_error = True  # Финальная ошибка — вернуть токен
     
     finally:
         # 4. ГАРАНТИРОВАННОЕ СОХРАНЕНИЕ РЕЗУЛЬТАТА (ВЫПОЛНИТСЯ ВСЕГДА)
@@ -925,10 +928,9 @@ def generate_music_task(self, user_id, prompt, task_id=None):
         except Exception as save_error:
             logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить результат задачи {task_id}: {save_error}")
 
-        # [FIX A2] ВОЗВРАТ ТОКЕНА И СБРОС СЧЕТЧИКА active_generations
-        # generate_music_task: ранее возврата токена не было — БАГ #2 + БАГ #3
+        # [FIX A2+RETRY-BUG] ВОЗВРАТ ТОКЕНА ТОЛЬКО ПРИ ФИНАЛЬНОЙ ОШИБКЕ, НЕ ПРИ RETRY
         if user_id != config.ADMIN_ID:
-            if result_status == 'error':
+            if result_status == 'error' and _should_refund_on_error:
                 try:
                     execute_query_sync(
                         "SELECT refund_tokens(%s, %s, %s)",
@@ -974,6 +976,7 @@ def generate_song_task(self, user_id, lyrics, style, custom_mode=False, is_song=
     suno_task_id = None
     suno_audio_id = None
     translated_style = None
+    _should_refund_on_error = True  # [FIX RETRY-BUG] Возвращать токен только при финальной ошибке
 
     try:
         # 1. ПОДГОТОВКА ДАННЫХ ДЛЯ SUNO API
@@ -1039,18 +1042,18 @@ def generate_song_task(self, user_id, lyrics, style, custom_mode=False, is_song=
         result_status = 'error'
         result_message = str(e)
         
-        # Пытаемся повторить задачу (максимум 3 раза)
-        try:
-            self.retry(countdown=30, max_retries=3)
-        except self.MaxRetriesExceededError:
+        # [FIX RETRY-BUG] Пытаемся повторить задачу, НО токен возвращаем только при финальной ошибке
+        if self.request.retries < 3:
+            _should_refund_on_error = False  # Промежуточная попытка — НЕ возвращать токен
+            self.retry(exc=e, countdown=30, max_retries=3)
+        else:
             logger.error(f"🚫 Превышено максимальное количество попыток для задачи {task_id}")
+            _should_refund_on_error = True  # Финальная ошибка — вернуть токен
     
     finally:
-        # [FIX A3] ВОЗВРАТ СРЕДСТВ И СБРОС СЧЕТЧИКА active_generations
-        # Ранее: прямой UPDATE balance+1 не вызывал finish_generation() — БАГ #3
-        # Теперь: refund_tokens() возвращает токен И уменьшает active_generations атомарно
+        # [FIX A3+RETRY-BUG] ВОЗВРАТ ТОКЕНА ТОЛЬКО ПРИ ФИНАЛЬНОЙ ОШИБКЕ, НЕ ПРИ RETRY
         if user_id != config.ADMIN_ID:
-            if result_status == 'error':
+            if result_status == 'error' and _should_refund_on_error:
                 try:
                     execute_query_sync(
                         "SELECT refund_tokens(%s, %s, %s)",

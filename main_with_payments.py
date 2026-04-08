@@ -31,6 +31,7 @@ from celery_tasks import celery_app, generate_music_task, generate_song_task, ge
 import demo_system  # Модуль демо-системы для разблокировки треков
 
 # Настройка логирования
+logger = logging.getLogger(__name__)
 
 # Инициализация пула соединений с БД
 
@@ -64,6 +65,39 @@ except Exception as _e:
 
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
+
+# ============================================================
+# РЕЖИМ ТЕХНИЧЕСКОГО ОБСЛУЖИВАНИЯ
+# Установите MAINTENANCE_MODE = False когда сервис восстановлен
+# ============================================================
+MAINTENANCE_MODE = False
+MAINTENANCE_TEXT = (
+    "🔧 *Бот находится на техническом обслуживании*\n\n"
+    "Мы работаем над улучшением сервиса и скоро вернёмся!\n\n"
+    "Приносим извинения за временные неудобства 🙏\n\n"
+    "Следите за обновлениями в нашем канале: @ALBImusic_Chart"
+)
+
+from aiogram.dispatcher.middlewares import BaseMiddleware
+from aiogram.dispatcher.handler import CancelHandler
+
+class MaintenanceMiddleware(BaseMiddleware):
+    """Перехватывает все обращения к боту в режиме техобслуживания."""
+
+    async def on_pre_process_message(self, message: types.Message, data: dict):
+        if MAINTENANCE_MODE and not is_admin(message.from_user.id):
+            await message.reply(MAINTENANCE_TEXT, parse_mode="Markdown")
+            raise CancelHandler()
+
+    async def on_pre_process_callback_query(self, callback_query: types.CallbackQuery, data: dict):
+        if MAINTENANCE_MODE and not is_admin(callback_query.from_user.id):
+            await callback_query.answer(
+                "🔧 Бот на техническом обслуживании. Скоро вернёмся!",
+                show_alert=True
+            )
+            raise CancelHandler()
+
+dp.middleware.setup(MaintenanceMiddleware())
 
 # Регистрация обработчиков демо-системы
 demo_system.register_handlers(dp, bot)
@@ -707,6 +741,8 @@ def get_generation_mode_keyboard():
 def get_balance_keyboard(user_id):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
+        # 🔥 СТАРТОВЫЙ ПАКЕТ — первым, чтобы бросался в глаза
+        InlineKeyboardButton("🎁 5 генераций (10 треков) — 99₽ (СТАРТ)", callback_data="pay_99"),
         InlineKeyboardButton("📄 Документы", callback_data="show_documents"),
         InlineKeyboardButton("🌟 Пригласить друга (2 токена в подарок)", callback_data="invite_friend"),
         InlineKeyboardButton("💳 10 генераций (20 треков) — 490₽", callback_data="pay_500"),
@@ -782,6 +818,122 @@ async def yookassa_webhook(request: Request):
 
             # Обработка обычных платежей за генерации
             user_id = payment.get('metadata', {}).get('user_id')
+            payment_type_meta = payment.get('metadata', {}).get('payment_type', '')
+            task_id_unlock = payment.get('metadata', {}).get('task_id', '')
+
+            # ============================================================
+            # Специальная обработка: разблокировка первой генерации за 50₽
+            # ============================================================
+            if payment_type_meta == 'unlock_first' and task_id_unlock and user_id:
+                platform_meta = payment.get('metadata', {}).get('platform', 'telegram')
+                logging.info(f"🔓 Оплата разблокировки первой генерации: user={user_id}, task={task_id_unlock}, platform={platform_meta}")
+                add_payment(user_id, 50.0, 'succeeded', payment_id)
+
+                # Разблокируем трек в БД
+                execute_query_sync(
+                    "UPDATE demo_tracks SET is_unlocked = TRUE, unlocked_at = NOW() WHERE task_id = %s",
+                    (task_id_unlock,)
+                )
+
+                # Получаем URL полных треков
+                demo_data = execute_query_sync(
+                    "SELECT full_url_1, full_url_2 FROM demo_tracks WHERE task_id = %s",
+                    (task_id_unlock,)
+                )
+
+                if platform_meta == 'vk':
+                    # ── VK нотификация (синхронная) ──────────────────────────────
+                    def _notify_vk_unlock(uid=user_id, tid=task_id_unlock, dd=demo_data):
+                        try:
+                            from celery_tasks import send_vk_result
+                            if dd and dd[0]:
+                                full_url_1, full_url_2 = dd[0]
+                                urls = [u for u in [full_url_1, full_url_2] if u]
+                                for idx, url in enumerate(urls, 1):
+                                    send_vk_result(
+                                        int(uid),
+                                        f"🎉 Оплата прошла! Полная версия {idx}:",
+                                        url
+                                    )
+                            # Текст с опциями
+                            from celery_tasks import send_vk_result as _svr
+                            _svr(int(uid),
+                                "✅ Полная версия разблокирована!\n\n"
+                                "💎 Что можно сделать с этой песней:\n\n"
+                                "🎤 Минусовка — версия без вокала\n"
+                                "🎸 Кавер — перепой в другом жанре\n"
+                                "🎵 В WAV — профессиональный формат\n\n"
+                                "🚀 Хочешь создать ещё? Напиши «Создать песню»!"
+                            )
+                        except Exception as e:
+                            logging.error(f"❌ Ошибка VK unlock нотификации: {e}")
+
+                    import threading as _threading
+                    _threading.Thread(target=_notify_vk_unlock, daemon=True).start()
+
+                else:
+                    # ── TG нотификация (асинхронная) ─────────────────────────────
+                    async def _send_unlocked_first_gen(uid=user_id, tid=task_id_unlock, dd=demo_data):
+                        try:
+                            await bot.send_message(
+                                int(uid),
+                                "🎉 *Оплата прошла! Отправляю полные версии...*",
+                                parse_mode="Markdown"
+                            )
+                            if dd and dd[0]:
+                                full_url_1, full_url_2 = dd[0]
+                                urls = [u for u in [full_url_1, full_url_2] if u]
+                                for idx, url in enumerate(urls, 1):
+                                    try:
+                                        await bot.send_audio(
+                                            chat_id=int(uid),
+                                            audio=url,
+                                            caption=f"🎼 *Версия {idx}* — полная версия",
+                                            title=f"AI Music - Full Version {idx}",
+                                            performer="ALBI Music",
+                                            parse_mode="Markdown"
+                                        )
+                                    except Exception as e:
+                                        logging.error(f"❌ Ошибка отправки полной версии {idx} после TG unlock: {e}")
+
+                            # Кнопки — всё как при обычной оплаченной генерации
+                            full_keyboard = InlineKeyboardMarkup(row_width=2)
+                            full_keyboard.add(
+                                InlineKeyboardButton("🎧 Послушать", callback_data=f"play_{tid}"),
+                            )
+                            full_keyboard.add(
+                                InlineKeyboardButton("🎤 Минусовка (1 токен)", callback_data=f"karaoke_{tid}"),
+                                InlineKeyboardButton("🎸 Кавер (2 токена)", callback_data=f"cover_{tid}")
+                            )
+                            full_keyboard.add(
+                                InlineKeyboardButton("🎵 В WAV (1 токен)", callback_data=f"wav_{tid}"),
+                                InlineKeyboardButton("📢 Отправить в канал", callback_data=f"post_{tid}")
+                            )
+                            full_keyboard.add(
+                                InlineKeyboardButton("🔗 Поделиться с другом", switch_inline_query=tid),
+                                InlineKeyboardButton("🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")
+                            )
+                            await bot.send_message(
+                                int(uid),
+                                "✅ *Полные версии разблокированы!*\n\n"
+                                "💎 *Что можно сделать с этой песней:*\n\n"
+                                "🎧 **Послушать** — полная версия без ограничений\n"
+                                "🎤 **Минусовка** — версия без вокала для исполнения\n"
+                                "🎸 **Кавер** — перепой в другом стиле/жанре\n"
+                                "🎵 **В WAV** — конвертируй в WAV формат для профи\n"
+                                "📢 **Отправить в канал** — опубликуй в официальном канале\n"
+                                "🔗 **Поделиться** — отправь другу прямо сейчас\n\n"
+                                "🚀 Хочешь создать ещё? Нажми «Создать песню» в меню!",
+                                reply_markup=full_keyboard,
+                                parse_mode="Markdown"
+                            )
+                        except Exception as e:
+                            logging.error(f"❌ Ошибка отправки разблокированных треков TG unlock_first: {e}")
+
+                    asyncio.create_task(_send_unlocked_first_gen())
+
+                return JSONResponse({"status": "ok"})
+
             amount = float(payment.get('amount', {}).get('value', 0))
             if user_id and amount:
                 # Определяем количество токенов по сумме
@@ -808,39 +960,43 @@ async def yookassa_webhook(request: Request):
                 add_payment(user_id, amount, 'succeeded', payment.get('id'))
                 logging.info(f"✅ Начислено {tokens} токенов пользователю {user_id} (пакет: {package_type})")
 
-                try:
-                    if package_type == 'novice':
-                        # Пакет «Новичок» — специальное сообщение
-                        await bot.send_message(
-                            int(user_id),
-                            "🎉 Пакет «Новичок» активирован. Тебе начислено 5 токенов. Твори прямо сейчас!\n\n"
-                            "И обязательно посмотри примеры треков в нашем канале — <a href='https://t.me/ALBImusic_Chart/146'>ЗДЕСЬ</a>",
-                            parse_mode="HTML"
-                        )
-                    elif package_type == 'weekend':
-                        # Пакет «Выходные» — специальное сообщение
-                        await bot.send_message(
-                            int(user_id),
-                            "🎉 Тебе начислено 5 токенов. Пакет «Выходные» активирован. Срочно пиши песни про друзей!",
-                            parse_mode="HTML"
-                        )
-                    else:
-                        inline_kb = InlineKeyboardMarkup(row_width=2)
-                        inline_kb.add(
-                            InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
-                            InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
-                        )
-                        await bot.send_message(
-                            int(user_id),
-                            f"🎉 Спасибо! Оплата поступила!\n\n"
-                            f"💰 Начислено: *{tokens} токенов*\n\n"
-                            f"🎵 Теперь вы получаете полные версии песен!\n\n"
-                            f"Нажмите кнопку ниже чтобы начать 👇",
-                            reply_markup=inline_kb,
-                            parse_mode="Markdown"
-                        )
-                except Exception as e:
-                    logging.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {e}")
+                # Отправляем уведомление через asyncio.create_task чтобы избежать
+                # "Timeout context manager should be used inside a task"
+                async def _notify_payment(uid=user_id, tok=tokens, pkg=package_type):
+                    try:
+                        if pkg == 'novice':
+                            # Пакет «Новичок» — специальное сообщение
+                            await bot.send_message(
+                                int(uid),
+                                "🎉 Пакет «Новичок» активирован. Тебе начислено 5 токенов. Твори прямо сейчас!\n\n"
+                                "И обязательно посмотри примеры треков в нашем канале — <a href='https://t.me/ALBImusic_Chart/146'>ЗДЕСЬ</a>",
+                                parse_mode="HTML"
+                            )
+                        elif pkg == 'weekend':
+                            # Пакет «Выходные» — специальное сообщение
+                            await bot.send_message(
+                                int(uid),
+                                "🎉 Тебе начислено 5 токенов. Пакет «Выходные» активирован. Срочно пиши песни про друзей!",
+                                parse_mode="HTML"
+                            )
+                        else:
+                            inline_kb = InlineKeyboardMarkup(row_width=2)
+                            inline_kb.add(
+                                InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
+                                InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
+                            )
+                            await bot.send_message(
+                                int(uid),
+                                f"🎉 Спасибо! Оплата поступила!\n\n"
+                                f"💰 Начислено: *{tok} токенов*\n\n"
+                                f"🎵 Теперь вы получаете полные версии песен!\n\n"
+                                f"Нажмите кнопку ниже чтобы начать 👇",
+                                reply_markup=inline_kb,
+                                parse_mode="Markdown"
+                            )
+                    except Exception as e:
+                        logging.error(f"❌ Не удалось отправить уведомление пользователю {uid}: {e}")
+                asyncio.create_task(_notify_payment())
                 return JSONResponse({"status": "ok"})
         return JSONResponse({"status": "ignored"})
     except Exception as e:
@@ -1008,6 +1164,11 @@ async def handle_balance(message: types.Message, state: FSMContext):
     text = (
         f"💰 *Ваш баланс:* {balance}\n\n"
         f"💳 *Пополнить баланс:*\n\n"
+        f"🎁 *5 генераций \(10 треков\) — 99₽* ← старт\!\n"
+        f"💳 10 генераций \(20 треков\) — 490₽\n"
+        f"🔥 25 генераций \(50 треков\) — 990₽ \(ХИТ\!\)\n"
+        f"⭐ 60 генераций \(120 треков\) — 1990₽\n"
+        f"💎 140 генераций \(280 треков\) — 3990₽\n\n"
         f"🌟 *Пригласи друга* — получи 2 токена бесплатно\!\n\n"
         f"🎵 Вдохновение — в нашем канале: @ALBImusic\_chart"
     )
@@ -1692,12 +1853,13 @@ async def process_payment(callback_query: types.CallbackQuery):
 
     # Определяем сумму и количество токенов
     payment_data = {
-        'pay_500':  (490,  10,  "10 генераций (20 треков)"),
-        'pay_1000': (990,  25,  "25 генераций (50 треков)"),
-        'pay_2000': (1990, 60,  "60 генераций (120 треков)"),
-        'pay_4000': (3990, 140, "140 генераций (280 треков)"),
-        'pay_99_novice':  (99, 5, "Пакет «Новичок» (5 генераций — 10 треков)"),
-        'pay_99_weekend': (99, 5, "Пакет «Выходные» (5 генераций — 10 треков)"),
+        'pay_99':         (99,  5,   "Пакет «Старт» (5 генераций — 10 треков)"),   # ← новая кнопка
+        'pay_500':        (490,  10,  "10 генераций (20 треков)"),
+        'pay_1000':       (990,  25,  "25 генераций (50 треков)"),
+        'pay_2000':       (1990, 60,  "60 генераций (120 треков)"),
+        'pay_4000':       (3990, 140, "140 генераций (280 треков)"),
+        'pay_99_novice':  (99,   5,   "Пакет «Новичок» (5 генераций — 10 треков)"),
+        'pay_99_weekend': (99,   5,   "Пакет «Выходные» (5 генераций — 10 треков)"),
         # Обратная совместимость со старыми кнопками
         'pay_100':  (50,   1,   "1 токен"),
         'pay_490':  (490,  10,  "10 токенов"),
@@ -2363,7 +2525,7 @@ async def process_play_track(callback_query: types.CallbackQuery):
         if not url or url.startswith('ALREADY_'):
             continue
         try:
-            caption = f"🎼 Версия {idx}" if is_unlocked else f"🎧 Демо {idx} (45 сек)"
+            caption = f"🎼 Версия {idx}" if is_unlocked else f"🎧 Демо {idx} (60 сек)"
             await bot.send_audio(user_id, url, caption=caption, title=f"AI Music v{idx}", performer="ALBI Music")
             sent += 1
         except Exception as e:
@@ -2387,32 +2549,61 @@ async def process_play_track(callback_query: types.CallbackQuery):
             "🔗 **Поделиться** — отправь другу прямо сейчас"
         )
     else:
-        info_text = (
-            "🎧 **Это 45-секундное демо**\n\n"
-            "🔓 Разблокируй полные версии за **1 токен** — без ограничений по времени!\n\n"
-            "**Что ещё можно сделать:**\n"
-            "🎤 **Минусовка** — версия без вокала для исполнения\n"
-            "🎸 **Кавер** — перепой в другом стиле/жанре\n"
-            "🎵 **В WAV** — конвертируй в WAV формат для профи\n"
-            "📢 **Отправить в канал** — опубликуй в нашем официальном канале\n"
-            "🔗 **Поделиться** — отправь другу прямо сейчас"
+        # Определяем: новичок (без платёжной истории) → 50₽, иначе → 1 токен
+        paid_check = execute_query_sync(
+            "SELECT COUNT(*) FROM payments WHERE user_id = %s AND status = 'succeeded'",
+            (user_id,)
+        )
+        user_has_paid = paid_check and paid_check[0][0] > 0
+
+        if not user_has_paid:
+            # Первая генерация / нет платёжной истории → предлагаем 50₽
+            info_text = (
+                "🎧 **Это 60-секундное демо**\n\n"
+                "🔓 Разблокируй полную версию за **50₽** — без ограничений по времени!\n\n"
+                "**Что получишь после оплаты:**\n"
+                "🎤 **Минусовка** — версия без вокала\n"
+                "🎸 **Кавер** — перепой в другом стиле\n"
+                "🎵 **В WAV** — профессиональный формат\n"
+                "📢 **В канал** — поделись с другими!\n"
+                "🔗 **Скачать** — сохрани трек навсегда"
+            )
+            markup.add(
+                InlineKeyboardButton("🔓 Получить ПОЛНУЮ версию — 50₽", callback_data=f"pay_unlock_50_{task_id}")
+            )
+        else:
+            # Пользователь уже платил — предлагаем 1 токен
+            info_text = (
+                "🎧 **Это 60-секундное демо**\n\n"
+                "🔓 Разблокируй полные версии за **1 токен** — без ограничений по времени!\n\n"
+                "**Что ещё можно сделать:**\n"
+                "🎤 **Минусовка** — версия без вокала для исполнения\n"
+                "🎸 **Кавер** — перепой в другом стиле/жанре\n"
+                "🎵 **В WAV** — конвертируй в WAV формат для профи\n"
+                "📢 **Отправить в канал** — опубликуй в нашем официальном канале\n"
+                "🔗 **Поделиться** — отправь другу прямо сейчас"
+            )
+            markup.add(
+                InlineKeyboardButton("🔓 Разблокировать полные версии (1 токен)", callback_data=f"unlock_{task_id}")
+            )
+
+    if is_unlocked:
+        markup.add(
+            InlineKeyboardButton("🎤 Минусовка (1 токен)", callback_data=f"karaoke_{task_id}"),
+            InlineKeyboardButton("🎸 Кавер (2 токена)", callback_data=f"cover_{task_id}")
         )
         markup.add(
-            InlineKeyboardButton("🔓 Разблокировать полные версии (1 токен)", callback_data=f"unlock_{task_id}")
+            InlineKeyboardButton("🎵 В WAV (1 токен)", callback_data=f"wav_{task_id}"),
+            InlineKeyboardButton("📢 Отправить в канал", callback_data=f"post_{task_id}")
         )
-
-    markup.add(
-        InlineKeyboardButton("🎤 Минусовка (1 токен)", callback_data=f"karaoke_{task_id}"),
-        InlineKeyboardButton("🎸 Кавер (2 токена)", callback_data=f"cover_{task_id}")
-    )
-    markup.add(
-        InlineKeyboardButton("🎵 В WAV (1 токен)", callback_data=f"wav_{task_id}"),
-        InlineKeyboardButton("📢 Отправить в канал", callback_data=f"post_{task_id}")
-    )
-    markup.add(
-        InlineKeyboardButton("🔗 Отправить другу", switch_inline_query=task_id),
-        InlineKeyboardButton("🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")
-    )
+        markup.add(
+            InlineKeyboardButton("🔗 Отправить другу", switch_inline_query=task_id),
+            InlineKeyboardButton("🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")
+        )
+    else:
+        markup.add(
+            InlineKeyboardButton("🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")
+        )
 
     await bot.send_message(user_id, info_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -3292,6 +3483,60 @@ async def process_unlock_full_versions(callback_query: types.CallbackQuery, stat
         parse_mode="Markdown"
     )
     logger.info(f"✅ Разблокированы полные версии: user {user_id}, task {task_id}")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('pay_unlock_50_'), state='*')
+async def process_pay_unlock_first_gen(callback_query: types.CallbackQuery, state: FSMContext):
+    """Создаёт платёж ЮKassa 50₽ для разблокировки первой (демо) генерации"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    task_id = callback_query.data.replace('pay_unlock_50_', '')
+
+    # Проверяем — вдруг уже разблокирован (двойной клик)
+    demo_check = execute_query_sync(
+        "SELECT is_unlocked FROM demo_tracks WHERE task_id = %s AND user_id = %s",
+        (task_id, user_id)
+    )
+    if demo_check and demo_check[0] and demo_check[0][0]:
+        await callback_query.answer("✅ Этот трек уже разблокирован!", show_alert=True)
+        return
+
+    # Создаём платёж ЮKassa на 50₽
+    payment = await create_yookassa_payment(
+        user_id,
+        50,
+        "Разблокировка полной версии трека ALBI Music",
+        {"payment_type": "unlock_first", "task_id": task_id}
+    )
+
+    if payment and payment.get('confirmation', {}).get('confirmation_url'):
+        payment_url = payment['confirmation']['confirmation_url']
+        payment_id = payment['id']
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("💳 Оплатить 50₽ — получить полную версию", url=payment_url))
+        markup.add(InlineKeyboardButton("🎧 Послушать демо ещё раз", callback_data=f"play_{task_id}"))
+
+        await bot.send_message(
+            user_id,
+            "🔓 *Разблокировка полной версии трека*\n\n"
+            "💰 Стоимость: *50₽* — разовый платёж\n\n"
+            "✅ После оплаты ты получишь:\n"
+            "• Оба трека без ограничения по времени\n"
+            "• Кнопки «Послушать» и «Скачать»\n"
+            "• Минусовку, Кавер, WAV и всё остальное\n\n"
+            "👇 Нажми кнопку ниже для оплаты:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        logging.info(f"💳 Создан платёж unlock_first: user={user_id}, task={task_id}, payment_id={payment_id}")
+    else:
+        await bot.send_message(
+            user_id,
+            "❌ Не удалось создать платёж. Попробуйте ещё раз или обратитесь в поддержку.",
+        )
+        logging.error(f"❌ Ошибка создания платежа unlock_first: user={user_id}, task={task_id}")
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith('cover_') and not c.data.endswith(('_v1', '_v2')) and not c.data.startswith('cover_genre_'), state='*')
 async def ask_cover_version(callback_query: types.CallbackQuery, state: FSMContext):

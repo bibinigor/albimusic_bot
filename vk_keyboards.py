@@ -194,23 +194,27 @@ def get_track_actions_keyboard():
 def get_balance_actions_keyboard():
     """Клавиатура для страницы баланса"""
     keyboard = VkKeyboard(one_time=False)
-    
-    keyboard.add_button("💫 1 токен - 50₽", color=VkKeyboardColor.POSITIVE)
-    keyboard.add_button("💳 10 токенов - 250₽", color=VkKeyboardColor.POSITIVE)
-    
+
+    # 🔥 СТАРТОВЫЙ ПАКЕТ — самая выгодная первая покупка
+    keyboard.add_button("🎁 5 токенов — 99₽ (старт)", color=VkKeyboardColor.NEGATIVE)
+
     keyboard.add_line()
-    keyboard.add_button("🔥 25 токенов - 500₽", color=VkKeyboardColor.POSITIVE)
-    keyboard.add_button("⭐ 60 токенов - 1000₽", color=VkKeyboardColor.POSITIVE)
-    
+    keyboard.add_button("💫 1 токен — 50₽", color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button("💳 10 токенов — 250₽", color=VkKeyboardColor.POSITIVE)
+
     keyboard.add_line()
-    keyboard.add_button("💎 140 токенов - 2000₽", color=VkKeyboardColor.POSITIVE)
-    
+    keyboard.add_button("🔥 25 токенов — 500₽", color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button("⭐ 60 токенов — 1000₽", color=VkKeyboardColor.POSITIVE)
+
+    keyboard.add_line()
+    keyboard.add_button("💎 140 токенов — 2000₽", color=VkKeyboardColor.POSITIVE)
+
     keyboard.add_line()
     keyboard.add_button("🎁 Пригласить друга", color=VkKeyboardColor.PRIMARY)
-    
+
     keyboard.add_line()
     keyboard.add_button("🏠 В главное меню", color=VkKeyboardColor.SECONDARY)
-    
+
     return keyboard
 
 def get_lyrics_variants_selection_keyboard():
@@ -356,16 +360,17 @@ def get_lyrics_variants_keyboard_with_two_options():
 def get_payment_tariffs_keyboard():
     """Клавиатура с тарифами оплаты (inline-кнопки с callback)"""
     keyboard = VkKeyboard(inline=True)
-    
+
     # Тарифы синхронизированы с Telegram-ботом
     tariffs = [
+        ("🎁 5 токенов — 99₽ (старт)", 99),   # ← стартовый пакет вверху
         ("💫 1 токен — 50₽", 50),
         ("💳 10 токенов — 250₽", 250),
         ("🔥 25 токенов — 500₽", 500),
         ("⭐ 60 токенов — 1000₽", 1000),
         ("💎 140 токенов — 2000₽", 2000)
     ]
-    
+
     for label, amount in tariffs:
         keyboard.add_callback_button(
             label=label,
@@ -373,14 +378,40 @@ def get_payment_tariffs_keyboard():
             payload=json.dumps({"action": "payment", "amount": amount})
         )
         keyboard.add_line()
-    
+
     # Кнопка приглашения друга
     keyboard.add_callback_button(
         label="🌟 Пригласить друга (+2 токена)",
         color=VkKeyboardColor.PRIMARY,
         payload=json.dumps({"action": "invite_friend"})
     )
-    
+
+    return keyboard
+
+
+def get_buy_more_keyboard():
+    """Inline-клавиатура «Создать ещё» — показывается сразу после результата генерации.
+    Цель: предложить следующую генерацию пока эмоции ещё свежи."""
+    keyboard = VkKeyboard(inline=True)
+
+    keyboard.add_callback_button(
+        label="🎁 5 треков — 99₽ (старт)",
+        color=VkKeyboardColor.NEGATIVE,
+        payload=json.dumps({"action": "payment", "amount": 99})
+    )
+    keyboard.add_line()
+    keyboard.add_callback_button(
+        label="💳 10 треков — 250₽",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "payment", "amount": 250})
+    )
+    keyboard.add_line()
+    keyboard.add_callback_button(
+        label="🌟 Пригласить друга (+2 бесплатно)",
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"action": "invite_friend"})
+    )
+
     return keyboard
 
 def get_track_actions_keyboard(task_id, has_two_variants=False):
@@ -423,18 +454,23 @@ def get_track_actions_keyboard(task_id, has_two_variants=False):
     return keyboard
 
 def get_music_result_keyboard(urls, task_id=None, suno_ids=None):
-    """Клавиатура с ссылками на варианты музыки.
-    
-    Для каждого трека показывает две кнопки в одной строке:
-      🎧 Слушать  — открывает Suno веб-плеер (без скачивания, удобно на телефоне)
-      ⬇️ Скачать  — прямая CDN-ссылка для сохранения MP3
-    
+    """Клавиатура с кнопками «Слушать» и «Скачать» для каждого варианта.
+
+    «Слушать» — open_link кнопка: открывает HTML5-плеер albi-music.ru напрямую,
+    пользователь сразу переходит по ссылке без дополнительных сообщений.
+
+    «Скачать» — open_link кнопка: прямая CDN-ссылка, скачивает MP3 на устройство.
+
+    Примечание: VK API не поддерживает цвет для openlink-кнопок, поэтому
+    обе кнопки белые — различаются иконками (🎵 vs ⬇️).
+
     Args:
-        urls:      str или list — CDN-ссылки на MP3 (может быть JSON-массив)
-        task_id:   опционально, не используется в этой функции
-        suno_ids:  str или list — ID треков Suno (может быть JSON-массив или строка)
+        urls:     str или list — CDN-ссылки на MP3 (может быть JSON-массив)
+        task_id:  не используется (оставлен для обратной совместимости)
+        suno_ids: не используется (оставлен для обратной совместимости)
     """
     import json as _json
+    import urllib.parse as _urlparse
 
     keyboard = VkKeyboard(inline=True)
 
@@ -444,37 +480,25 @@ def get_music_result_keyboard(urls, task_id=None, suno_ids=None):
     except Exception:
         url_list = [urls] if isinstance(urls, str) else list(urls)
 
-    # --- Парсим Suno ID-шники ---
-    sid_list = []
-    if suno_ids:
-        try:
-            if isinstance(suno_ids, str) and suno_ids.startswith('['):
-                sid_list = _json.loads(suno_ids)
-            elif isinstance(suno_ids, str):
-                sid_list = [suno_ids]
-            elif isinstance(suno_ids, list):
-                sid_list = suno_ids
-        except Exception:
-            sid_list = [str(suno_ids)] if suno_ids else []
-
-    # --- Добавляем кнопки для каждого варианта ---
+    # --- Для каждого варианта: «Слушать» (openlink → плеер) + «Скачать» (openlink → MP3) ---
     for i, cdn_url in enumerate(url_list, 1):
         variant_label = f" вариант {i}" if len(url_list) > 1 else ""
+        cdn_url_str = str(cdn_url)
 
-        # Ссылка для прослушивания: Suno веб-плеер (если есть ID) или CDN
-        suno_id = sid_list[i - 1] if i - 1 < len(sid_list) else None
-        listen_url = f"https://suno.com/song/{suno_id}" if suno_id else cdn_url
+        # Формируем URL плеера: https://albi-music.ru/player?url=<encoded>&title=ALBI+Music
+        encoded_cdn = _urlparse.quote(cdn_url_str, safe='')
+        player_url = f"https://albi-music.ru/player?url={encoded_cdn}&title=ALBI+Music"
 
-        # Кнопка "Слушать" — открывает плеер, НЕ скачивает
+        # «Слушать» — open_link, открывает плеер напрямую (пользователь сразу переходит)
         keyboard.add_openlink_button(
-            label=f"🎧 Слушать{variant_label}",
-            link=listen_url
+            label=f"🎵 Слушать{variant_label}",
+            link=player_url
         )
 
-        # Кнопка "Скачать" — прямой MP3 для сохранения
+        # «Скачать» — open_link, прямое скачивание MP3
         keyboard.add_openlink_button(
             label=f"⬇️ Скачать{variant_label}",
-            link=cdn_url
+            link=cdn_url_str
         )
 
         if i < len(url_list):
