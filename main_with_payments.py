@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Инициализация бота
-bot = Bot(token=config.BOT_TOKEN)
+bot = Bot(token=config.BOT_TOKEN, proxy='socks5://127.0.0.1:9050')
 
 # Инициализация пула соединений с БД
 from db_utils import init_db_pool_sync
@@ -699,6 +699,52 @@ async def send_zero_balance_message(user_id, state=None):
         parse_mode="HTML"
     )
 
+async def send_no_tokens_message(user_id, context_text="У вас недостаточно токенов", state=None):
+    """Отправляет сообщение о нехватке токенов.
+
+    Новичкам (newcomer_offer_shown=False) показывает разовый оффер 5 токенов за 99₽.
+    Всем остальным — стандартное сообщение с клавиатурой пополнения.
+    Флаг newcomer_offer_shown ставится ДО отправки (защита от повторного показа).
+    """
+    if state:
+        await state.finish()
+    try:
+        result = execute_query_sync(
+            "SELECT newcomer_offer_shown FROM users WHERE user_id = %s", (user_id,)
+        )
+        offer_shown = result[0][0] if result and result[0] else True
+    except Exception as _e:
+        logger.warning(f"⚠️ newcomer_offer check error for {user_id}: {_e}")
+        offer_shown = True
+
+    if not offer_shown:
+        # Ставим флаг ДО отправки — защита от повторного показа при ошибке
+        try:
+            execute_query_sync(
+                "UPDATE users SET newcomer_offer_shown = TRUE WHERE user_id = %s", (user_id,)
+            )
+        except Exception as _e:
+            logger.warning(f"⚠️ newcomer_offer update error for {user_id}: {_e}")
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🎁 5 токенов за 99₽ — ЗАБРАТЬ ОФФЕР", callback_data="newcomer_offer_pay"))
+        markup.add(InlineKeyboardButton("💳 Все тарифы", callback_data="go_to_balance"))
+        await bot.send_message(
+            user_id,
+            "❌ *Токены закончились!*\n\n"
+            "🎁 *РАЗОВОЕ ПРЕДЛОЖЕНИЕ ДЛЯ НОВИЧКОВ*\n\n"
+            "Получи *5 токенов за 99₽* прямо сейчас!\n\n"
+            "⚡ Это предложение показывается *ТОЛЬКО ОДИН РАЗ* и больше *НИКОГДА* не появится.\n\n"
+            "👇 Нажми кнопку, чтобы воспользоваться оффером:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    else:
+        await bot.send_message(
+            user_id,
+            f"❌ {context_text}",
+            reply_markup=get_balance_keyboard(user_id)
+        )
+
 async def check_channel_subscription(user_id: int) -> bool:
     """Проверяет подписку пользователя на официальный канал через Telegram API"""
     try:
@@ -977,6 +1023,16 @@ async def yookassa_webhook(request: Request):
                             await bot.send_message(
                                 int(uid),
                                 "🎉 Тебе начислено 5 токенов. Пакет «Выходные» активирован. Срочно пиши песни про друзей!",
+                                parse_mode="HTML"
+                            )
+                        elif pkg == 'newcomer_offer':
+                            # Новичковый оффер — разовое предложение для новичков
+                            await bot.send_message(
+                                int(uid),
+                                "🎁 <b>Стартовый пакет активирован!</b>\n\n"
+                                "Тебе начислено 5 токенов — это 10 треков. Твори прямо сейчас!\n\n"
+                                "И обязательно посмотри примеры треков в нашем канале — "
+                                "<a href='https://t.me/ALBImusic_Chart/146'>ЗДЕСЬ</a>",
                                 parse_mode="HTML"
                             )
                         else:
@@ -1553,7 +1609,7 @@ async def process_song_idea(message: types.Message, state: FSMContext):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await send_zero_balance_message(user_id, state)
+            await send_no_tokens_message(user_id, "Бесплатные генерации закончились! Нажмите 💰 Баланс для пополнения.", state)
             return
 
     # Ограничение Suno API: макс 200 символов
@@ -2643,19 +2699,7 @@ async def process_repeat_track(callback_query: types.CallbackQuery):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            referral_link = f"https://t.me/AlBimusic_bot?start=ref_{user_id}"
-            await bot.send_message(
-                user_id,
-                (
-                    "❌ *Недостаточно токенов!*\n\n"
-                    "Чтобы создать ещё песни:\n"
-                    "💰 *Купить токены* — нажми кнопку Баланс\n"
-                    "🤝 *Пригласи друга* — получи **2 токена** бесплатно!\n\n"
-                    f"🔗 Твоя реферальная ссылка:\n`{referral_link}`"
-                ),
-                reply_markup=get_main_menu_keyboard(user_id),
-                parse_mode="Markdown"
-            )
+            await send_no_tokens_message(user_id, "Недостаточно токенов! Нажмите 💰 Баланс для пополнения.")
             return
         # Списываем генерацию
         execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
@@ -2713,11 +2757,8 @@ async def process_lyrics_regenerate(callback_query: types.CallbackQuery, state: 
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await bot.answer_callback_query(
-                callback_query.id,
-                "❌ Недостаточно токенов. Нажмите кнопку 💰 Баланс чтобы пополнить.",
-                show_alert=True
-            )
+            await bot.answer_callback_query(callback_query.id)
+            await send_no_tokens_message(user_id, "Недостаточно токенов для перегенерации текста. Нажмите 💰 Баланс для пополнения.")
             return
 
     await bot.answer_callback_query(callback_query.id, "🔄 Генерирую новый текст...")
@@ -2903,7 +2944,7 @@ async def start_music_generation(user_id, genre, state: FSMContext, message):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await send_zero_balance_message(user_id, state)
+            await send_no_tokens_message(user_id, "Бесплатные генерации закончились! Нажмите 💰 Баланс для пополнения.", state)
             return
         # Списываем генерацию
         execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
@@ -2962,7 +3003,7 @@ async def start_song_generation(user_id, lyrics, genre, state: FSMContext, messa
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await send_zero_balance_message(user_id, state)
+            await send_no_tokens_message(user_id, "Бесплатные генерации закончились! Нажмите 💰 Баланс для пополнения.", state)
             return
         # Списываем генерацию
         execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
@@ -3028,13 +3069,7 @@ async def process_karaoke_audio_upload(message: types.Message, state: FSMContext
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance < 1:
-            await message.answer(
-                "❌ *Недостаточно токенов!*\n\n"
-                "💰 Стоимость минусовки: 1 токен",
-                parse_mode="Markdown",
-                reply_markup=get_balance_keyboard(user_id)
-            )
-            await state.finish()
+            await send_no_tokens_message(user_id, "Недостаточно токенов! Стоимость минусовки: 1 токен", state)
             return
         update_user_balance(user_id, -1)
 
@@ -3136,13 +3171,7 @@ async def process_cover_audio_upload(message: types.Message, state: FSMContext):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance < 2:
-            await message.answer(
-                "❌ *Недостаточно токенов!*\n\n"
-                "💰 Стоимость кавера: 2 токена",
-                parse_mode="Markdown",
-                reply_markup=get_balance_keyboard(user_id)
-            )
-            await state.finish()
+            await send_no_tokens_message(user_id, "Недостаточно токенов! Стоимость кавера: 2 токена", state)
             return
         update_user_balance(user_id, -2)
 
@@ -3283,14 +3312,7 @@ async def process_karaoke(callback_query: types.CallbackQuery, state: FSMContext
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance < 1:
-            await bot.send_message(
-                user_id,
-                "❌ *Недостаточно токенов для создания минусовки!*\n\n"
-                "💰 Стоимость: 1 токен\n\n"
-                "Пополните баланс или пригласите друга 🎁",
-                parse_mode="Markdown",
-                reply_markup=get_balance_keyboard(user_id)
-            )
+            await send_no_tokens_message(user_id, "Недостаточно токенов для создания минусовки! Стоимость: 1 токен")
             return
 
         # Списываем 1 генерацию
@@ -3366,14 +3388,7 @@ async def process_wav_conversion(callback_query: types.CallbackQuery, state: FSM
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance < 1:
-            await bot.send_message(
-                user_id,
-                "❌ *Недостаточно токенов для конвертации в WAV!*\n\n"
-                "💰 Стоимость: 1 токен\n\n"
-                "Пополните баланс или пригласите друга 🎁",
-                parse_mode="Markdown",
-                reply_markup=get_balance_keyboard(user_id)
-            )
+            await send_no_tokens_message(user_id, "Недостаточно токенов для конвертации в WAV! Стоимость: 1 токен")
             return
 
         # Списываем 1 генерацию
@@ -3432,14 +3447,7 @@ async def process_unlock_full_versions(callback_query: types.CallbackQuery, stat
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance < 1:
-            await bot.send_message(
-                user_id,
-                "❌ *Недостаточно токенов для разблокировки!*\n\n"
-                "💰 Стоимость: 1 токен\n\n"
-                "Пополните баланс или пригласите друга 🎁",
-                parse_mode="Markdown",
-                reply_markup=get_balance_keyboard(user_id)
-            )
+            await send_no_tokens_message(user_id, "Недостаточно токенов для разблокировки! Стоимость: 1 токен")
             return
 
         # Списываем 1 токен
@@ -3538,6 +3546,42 @@ async def process_pay_unlock_first_gen(callback_query: types.CallbackQuery, stat
         logging.error(f"❌ Ошибка создания платежа unlock_first: user={user_id}, task={task_id}")
 
 
+# ============================================================
+# ОБРАБОТЧИК: разовое предложение новичку (5 токенов за 99₽)
+# ============================================================
+@dp.callback_query_handler(lambda c: c.data == 'newcomer_offer_pay', state='*')
+async def process_newcomer_offer_pay(callback_query: types.CallbackQuery, state: FSMContext):
+    """Создаёт платёж YooKassa 99₽ → 5 токенов (разовое предложение новичку)"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    logger.info(f"🎁 Новичковый оффер TG: создаём платёж 99₽ для пользователя {user_id}")
+
+    payment = await create_yookassa_payment(
+        user_id,
+        99,
+        "5 токенов — Стартовый пакет ALBI Music",
+        {"package_type": "newcomer_offer"}
+    )
+    if payment and payment.get('confirmation', {}).get('confirmation_url'):
+        payment_url = payment['confirmation']['confirmation_url']
+        payment_id = payment['id']
+        add_payment(user_id, 99, 'pending', payment_id)
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("💳 Оплатить 99₽ — получить 5 токенов", url=payment_url))
+        await bot.send_message(
+            user_id,
+            "🎁 *Стартовый пакет — 5 токенов за 99₽*\n\n"
+            "✅ После оплаты баланс пополнится автоматически в течение 1-2 минут!\n\n"
+            "👇 Нажми кнопку для оплаты:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        logger.info(f"✅ Создан newcomer_offer платёж для {user_id}: {payment_id}")
+    else:
+        await bot.send_message(user_id, "❌ Ошибка при создании платежа. Попробуйте позже.")
+        logger.error(f"❌ Ошибка newcomer_offer_pay для {user_id}")
+
+
 @dp.callback_query_handler(lambda c: c.data.startswith('cover_') and not c.data.endswith(('_v1', '_v2')) and not c.data.startswith('cover_genre_'), state='*')
 async def ask_cover_version(callback_query: types.CallbackQuery, state: FSMContext):
     """Спрашиваем какую версию использовать для кавера"""
@@ -3585,14 +3629,7 @@ async def process_cover(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance < 2:
-            await bot.send_message(
-                user_id,
-                "❌ *Недостаточно токенов для создания кавера!*\n\n"
-                "💰 Стоимость: 2 токена\n\n"
-                "Пополните баланс или пригласите друга 🎁",
-                parse_mode="Markdown",
-                reply_markup=get_balance_keyboard(user_id)
-            )
+            await send_no_tokens_message(user_id, "Недостаточно токенов для создания кавера! Стоимость: 2 токена")
             return
 
     # Сохраняем task_id и version в FSM для последующего использования
@@ -4023,11 +4060,7 @@ async def process_generation_mode(callback_query: types.CallbackQuery, state: FS
     if not is_admin(user_id):
         balance = get_balance_number(user_id)
         if balance <= 0:
-            await callback_query.message.answer(
-                "❌ Недостаточно токенов на балансе.\n\nНажмите кнопку 💰 Баланс чтобы пополнить.",
-                reply_markup=get_main_menu_keyboard(user_id)
-            )
-            await state.finish()
+            await send_no_tokens_message(user_id, "Недостаточно токенов на балансе. Нажмите 💰 Баланс для пополнения.", state)
             return
         execute_query_sync("UPDATE users SET balance = balance - 1 WHERE user_id = %s", (user_id,))
 
