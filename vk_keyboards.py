@@ -357,6 +357,24 @@ def get_lyrics_variants_keyboard_with_two_options():
     keyboard.add_button('🔄 Сгенерировать другие', color=VkKeyboardColor.POSITIVE)
     
     return keyboard
+
+def get_newcomer_offer_keyboard():
+    """Inline-клавиатура для разового предложения новичку (5 токенов за 99₽).
+    Показывается ровно ОДИН РАЗ в жизни пользователя при первой нехватке токенов."""
+    keyboard = VkKeyboard(inline=True)
+    keyboard.add_callback_button(
+        label="🎁 5 треков за 99₽ — ВЗЯТЬ СЕЙЧАС",
+        color=VkKeyboardColor.NEGATIVE,
+        payload=json.dumps({"action": "newcomer_offer_pay"})
+    )
+    keyboard.add_line()
+    keyboard.add_callback_button(
+        label="💰 Другие тарифы",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "show_balance"})
+    )
+    return keyboard
+
 def get_payment_tariffs_keyboard():
     """Клавиатура с тарифами оплаты (inline-кнопки с callback)"""
     keyboard = VkKeyboard(inline=True)

@@ -87,6 +87,15 @@ try:
 except Exception as e:
     logger.error(f"❌ Error creating users table: {e}")
 
+# Добавляем столбец newcomer_offer_shown (разовое предложение новичку) — если ещё нет
+try:
+    execute_query_sync("""
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS newcomer_offer_shown BOOLEAN DEFAULT FALSE
+    """)
+    logging.info("✅ Столбец newcomer_offer_shown готов")
+except Exception as e:
+    logger.warning(f"⚠️ Не удалось добавить newcomer_offer_shown: {e}")
+
 class VKBot:
     def __init__(self):
         # Инициализация базовых компонентов с обработкой ошибок
@@ -897,11 +906,7 @@ class VKBot:
                         command_handled = True
                         return  # Прерываем обработку текущего сообщения
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно генераций. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания песни нужен 1 токен.")
                         logger.warning(f"⚠️ Попытка создания песни при нулевом балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для создания песни: {e}")
@@ -950,11 +955,7 @@ class VKBot:
                         command_handled = True
                         return  # Прерываем обработку текущего сообщения
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно генераций. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания музыки нужен 1 токен.")
                         logger.warning(f"⚠️ Попытка создания музыки при нулевом балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для создания музыки: {e}")
@@ -1896,18 +1897,43 @@ class VKBot:
                                     total_users = total_users_res[0][0] if total_users_res else 658
                                     from vk_keyboards import get_buy_more_keyboard
                                     if new_balance <= 0:
-                                        # Токены закончились — сильный пейволл с соц. доказательством
-                                        self.send_message(
-                                            user_id=user_id,
-                                            message=(
-                                                f"🎵 Понравилось? Уже {total_users}+ музыкантов создают треки в ALBI!\n\n"
-                                                "⚠️ Токены закончились. Пополните баланс:\n"
-                                                "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
-                                                "💳 10 треков — 250₽\n\n"
-                                                "🤝 Или пригласите друга — получите 2 токена бесплатно!"
-                                            ),
-                                            keyboard=get_buy_more_keyboard()
-                                        )
+                                        # Токены закончились — одноразовый оффер или стандартный upsell
+                                        try:
+                                            _ofr1 = execute_query_sync("SELECT newcomer_offer_shown FROM users WHERE user_id = %s", (user_id,))
+                                            _ofr1_shown = _ofr1[0][0] if _ofr1 and _ofr1[0] else True
+                                        except Exception:
+                                            _ofr1_shown = True
+                                        if not _ofr1_shown:
+                                            execute_query_sync("UPDATE users SET newcomer_offer_shown = TRUE WHERE user_id = %s", (user_id,))
+                                            from vk_keyboards import get_newcomer_offer_keyboard
+                                            self.send_message(
+                                                user_id=user_id,
+                                                message=(
+                                                    f"🎵 Понравилось? Уже {total_users}+ музыкантов создают треки в ALBI!\n\n"
+                                                    "⚠️ Токены закончились.\n\n"
+                                                    "━━━━━━━━━━━━━━━━━━━━━\n"
+                                                    "🎁 РАЗОВОЕ ПРЕДЛОЖЕНИЕ ДЛЯ НОВИЧКОВ\n"
+                                                    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                                    "5 треков всего за 99₽ — специальный стартовый пакет.\n\n"
+                                                    "⚠️ Это предложение показывается вам ТОЛЬКО ОДИН РАЗ\n"
+                                                    "и больше НИКОГДА не появится.\n"
+                                                    "Это эксклюзив только для новичков — пользуйтесь, пока не исчезло! 🔥\n\n"
+                                                    "👇 Нажмите кнопку прямо сейчас:"
+                                                ),
+                                                keyboard=get_newcomer_offer_keyboard()
+                                            )
+                                        else:
+                                            self.send_message(
+                                                user_id=user_id,
+                                                message=(
+                                                    f"🎵 Понравилось? Уже {total_users}+ музыкантов создают треки в ALBI!\n\n"
+                                                    "⚠️ Токены закончились. Пополните баланс:\n"
+                                                    "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                                    "💳 10 треков — 250₽\n\n"
+                                                    "🤝 Или пригласите друга — получите 2 токена бесплатно!"
+                                                ),
+                                                keyboard=get_buy_more_keyboard()
+                                            )
                                     else:
                                         # Баланс есть — лёгкий upsell
                                         self.send_message(
@@ -2326,17 +2352,42 @@ class VKBot:
                             _total = _tu[0][0] if _tu else 658
                             from vk_keyboards import get_buy_more_keyboard
                             if _nb <= 0:
-                                self.send_message(
-                                    user_id=user_id,
-                                    message=(
-                                        f"🎵 Понравилось? Уже {_total}+ музыкантов создают треки в ALBI!\n\n"
-                                        "⚠️ Токены закончились. Пополните баланс:\n"
-                                        "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
-                                        "💳 10 треков — 250₽\n\n"
-                                        "🤝 Или пригласите друга — получите 2 токена бесплатно!"
-                                    ),
-                                    keyboard=get_buy_more_keyboard()
-                                )
+                                try:
+                                    _ofr2 = execute_query_sync("SELECT newcomer_offer_shown FROM users WHERE user_id = %s", (user_id,))
+                                    _ofr2_shown = _ofr2[0][0] if _ofr2 and _ofr2[0] else True
+                                except Exception:
+                                    _ofr2_shown = True
+                                if not _ofr2_shown:
+                                    execute_query_sync("UPDATE users SET newcomer_offer_shown = TRUE WHERE user_id = %s", (user_id,))
+                                    from vk_keyboards import get_newcomer_offer_keyboard
+                                    self.send_message(
+                                        user_id=user_id,
+                                        message=(
+                                            f"🎵 Понравилось? Уже {_total}+ музыкантов создают треки в ALBI!\n\n"
+                                            "⚠️ Токены закончились.\n\n"
+                                            "━━━━━━━━━━━━━━━━━━━━━\n"
+                                            "🎁 РАЗОВОЕ ПРЕДЛОЖЕНИЕ ДЛЯ НОВИЧКОВ\n"
+                                            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                            "5 треков всего за 99₽ — специальный стартовый пакет.\n\n"
+                                            "⚠️ Это предложение показывается вам ТОЛЬКО ОДИН РАЗ\n"
+                                            "и больше НИКОГДА не появится.\n"
+                                            "Это эксклюзив только для новичков — пользуйтесь, пока не исчезло! 🔥\n\n"
+                                            "👇 Нажмите кнопку прямо сейчас:"
+                                        ),
+                                        keyboard=get_newcomer_offer_keyboard()
+                                    )
+                                else:
+                                    self.send_message(
+                                        user_id=user_id,
+                                        message=(
+                                            f"🎵 Понравилось? Уже {_total}+ музыкантов создают треки в ALBI!\n\n"
+                                            "⚠️ Токены закончились. Пополните баланс:\n"
+                                            "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                            "💳 10 треков — 250₽\n\n"
+                                            "🤝 Или пригласите друга — получите 2 токена бесплатно!"
+                                        ),
+                                        keyboard=get_buy_more_keyboard()
+                                    )
                             else:
                                 self.send_message(
                                     user_id=user_id,
@@ -2480,17 +2531,42 @@ class VKBot:
                             total_users2 = total_u2[0][0] if total_u2 else 658
                             from vk_keyboards import get_buy_more_keyboard
                             if new_bal2 <= 0:
-                                self.send_message(
-                                    user_id=user_id,
-                                    message=(
-                                        f"🎵 Понравилось? Уже {total_users2}+ музыкантов создают треки в ALBI!\n\n"
-                                        "⚠️ Токены закончились. Пополните баланс:\n"
-                                        "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
-                                        "💳 10 треков — 250₽\n\n"
-                                        "🤝 Или пригласите друга — получите 2 токена бесплатно!"
-                                    ),
-                                    keyboard=get_buy_more_keyboard()
-                                )
+                                try:
+                                    _ofr3 = execute_query_sync("SELECT newcomer_offer_shown FROM users WHERE user_id = %s", (user_id,))
+                                    _ofr3_shown = _ofr3[0][0] if _ofr3 and _ofr3[0] else True
+                                except Exception:
+                                    _ofr3_shown = True
+                                if not _ofr3_shown:
+                                    execute_query_sync("UPDATE users SET newcomer_offer_shown = TRUE WHERE user_id = %s", (user_id,))
+                                    from vk_keyboards import get_newcomer_offer_keyboard
+                                    self.send_message(
+                                        user_id=user_id,
+                                        message=(
+                                            f"🎵 Понравилось? Уже {total_users2}+ музыкантов создают треки в ALBI!\n\n"
+                                            "⚠️ Токены закончились.\n\n"
+                                            "━━━━━━━━━━━━━━━━━━━━━\n"
+                                            "🎁 РАЗОВОЕ ПРЕДЛОЖЕНИЕ ДЛЯ НОВИЧКОВ\n"
+                                            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                            "5 треков всего за 99₽ — специальный стартовый пакет.\n\n"
+                                            "⚠️ Это предложение показывается вам ТОЛЬКО ОДИН РАЗ\n"
+                                            "и больше НИКОГДА не появится.\n"
+                                            "Это эксклюзив только для новичков — пользуйтесь, пока не исчезло! 🔥\n\n"
+                                            "👇 Нажмите кнопку прямо сейчас:"
+                                        ),
+                                        keyboard=get_newcomer_offer_keyboard()
+                                    )
+                                else:
+                                    self.send_message(
+                                        user_id=user_id,
+                                        message=(
+                                            f"🎵 Понравилось? Уже {total_users2}+ музыкантов создают треки в ALBI!\n\n"
+                                            "⚠️ Токены закончились. Пополните баланс:\n"
+                                            "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                            "💳 10 треков — 250₽\n\n"
+                                            "🤝 Или пригласите друга — получите 2 токена бесплатно!"
+                                        ),
+                                        keyboard=get_buy_more_keyboard()
+                                    )
                             else:
                                 self.send_message(
                                     user_id=user_id,
@@ -2662,17 +2738,42 @@ class VKBot:
                     total_users3 = total_users_res3[0][0] if total_users_res3 else 658
                     from vk_keyboards import get_buy_more_keyboard
                     if new_balance <= 0:
-                        self.send_message(
-                            user_id=user_id,
-                            message=(
-                                f"🎵 Понравилось? Уже {total_users3}+ музыкантов создают треки в ALBI!\n\n"
-                                "⚠️ Токены закончились. Пополните баланс:\n"
-                                "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
-                                "💳 10 треков — 250₽\n\n"
-                                "🤝 Или пригласите друга — получите 2 токена бесплатно!"
-                            ),
-                            keyboard=get_buy_more_keyboard()
-                        )
+                        try:
+                            _ofr4 = execute_query_sync("SELECT newcomer_offer_shown FROM users WHERE user_id = %s", (user_id,))
+                            _ofr4_shown = _ofr4[0][0] if _ofr4 and _ofr4[0] else True
+                        except Exception:
+                            _ofr4_shown = True
+                        if not _ofr4_shown:
+                            execute_query_sync("UPDATE users SET newcomer_offer_shown = TRUE WHERE user_id = %s", (user_id,))
+                            from vk_keyboards import get_newcomer_offer_keyboard
+                            self.send_message(
+                                user_id=user_id,
+                                message=(
+                                    f"🎵 Понравилось? Уже {total_users3}+ музыкантов создают треки в ALBI!\n\n"
+                                    "⚠️ Токены закончились.\n\n"
+                                    "━━━━━━━━━━━━━━━━━━━━━\n"
+                                    "🎁 РАЗОВОЕ ПРЕДЛОЖЕНИЕ ДЛЯ НОВИЧКОВ\n"
+                                    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                    "5 треков всего за 99₽ — специальный стартовый пакет.\n\n"
+                                    "⚠️ Это предложение показывается вам ТОЛЬКО ОДИН РАЗ\n"
+                                    "и больше НИКОГДА не появится.\n"
+                                    "Это эксклюзив только для новичков — пользуйтесь, пока не исчезло! 🔥\n\n"
+                                    "👇 Нажмите кнопку прямо сейчас:"
+                                ),
+                                keyboard=get_newcomer_offer_keyboard()
+                            )
+                        else:
+                            self.send_message(
+                                user_id=user_id,
+                                message=(
+                                    f"🎵 Понравилось? Уже {total_users3}+ музыкантов создают треки в ALBI!\n\n"
+                                    "⚠️ Токены закончились. Пополните баланс:\n"
+                                    "🎁 5 треков — 99₽ (выгоднее всего для старта)\n"
+                                    "💳 10 треков — 250₽\n\n"
+                                    "🤝 Или пригласите друга — получите 2 токена бесплатно!"
+                                ),
+                                keyboard=get_buy_more_keyboard()
+                            )
                     else:
                         self.send_message(
                             user_id=user_id,
@@ -2797,6 +2898,57 @@ class VKBot:
         self.send_message(user_id, result_text, keyboard=self.get_main_keyboard(user_id))
         logger.info(f"✅ Рассылка завершена: отправлено {sent}, ошибок {errors}")
 
+    def _send_no_tokens_message(self, user_id, context_text="Пополните баланс!"):
+        """
+        Отправляет сообщение о нехватке токенов.
+        При ПЕРВОМ показе добавляет одноразовое предложение для новичков:
+        5 токенов за 99₽. Показывается ровно один раз за всю историю пользователя.
+        После этого — только стандартное сообщение с основной клавиатурой.
+        """
+        try:
+            result = execute_query_sync(
+                "SELECT newcomer_offer_shown FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            offer_shown = result[0][0] if result and result[0] else True
+
+            if not offer_shown:
+                # Помечаем как показанное ДО отправки, чтобы не повторить при ошибке
+                execute_query_sync(
+                    "UPDATE users SET newcomer_offer_shown = TRUE WHERE user_id = %s",
+                    (user_id,)
+                )
+                from vk_keyboards import get_newcomer_offer_keyboard
+                self.send_message(
+                    user_id=user_id,
+                    message=(
+                        f"❌ {context_text}\n\n"
+                        "━━━━━━━━━━━━━━━━━━━━━\n"
+                        "🎁 РАЗОВОЕ ПРЕДЛОЖЕНИЕ ДЛЯ НОВИЧКОВ\n"
+                        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        "5 треков всего за 99₽ — специальный стартовый пакет.\n\n"
+                        "⚠️ Это предложение показывается вам ТОЛЬКО ОДИН РАЗ\n"
+                        "и больше НИКОГДА не появится.\n"
+                        "Это эксклюзив только для новичков — пользуйтесь, пока не исчезло! 🔥\n\n"
+                        "👇 Нажмите кнопку прямо сейчас:"
+                    ),
+                    keyboard=get_newcomer_offer_keyboard()
+                )
+                logger.info(f"🎁 Показано разовое предложение новичка пользователю {user_id}")
+            else:
+                self.send_message(
+                    user_id=user_id,
+                    message=f"❌ {context_text}",
+                    keyboard=self.get_main_keyboard(user_id)
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка _send_no_tokens_message для {user_id}: {e}")
+            self.send_message(
+                user_id=user_id,
+                message=f"❌ {context_text}",
+                keyboard=self.get_main_keyboard(user_id)
+            )
+
     def handle_callback(self, event):
         """Обработчик событий от кнопок (callback)"""
         try:
@@ -2874,6 +3026,7 @@ class VKBot:
                     # Определяем количество токенов по сумме
                     tokens_map = {
                         50: 1,
+                        99: 5,   # стартовый пакет / newcomer offer
                         250: 10,
                         500: 25,
                         1000: 60,
@@ -2950,6 +3103,64 @@ class VKBot:
                     )
                     return
             
+            # Обработка кнопки разового предложения новичку (5 токенов за 99₽)
+            elif action == "newcomer_offer_pay":
+                logger.info(f"🎁 Новичковый оффер: создаём платёж 99₽ для пользователя {user_id}")
+                try:
+                    from yookassa import Configuration, Payment as YKPayment
+                    import uuid
+                    from vk_config import YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY
+                    Configuration.account_id = YOOKASSA_SHOP_ID
+                    Configuration.secret_key = YOOKASSA_SECRET_KEY
+
+                    idempotence_key = str(uuid.uuid4())
+                    payment = YKPayment.create({
+                        "amount": {"value": "99.00", "currency": "RUB"},
+                        "confirmation": {
+                            "type": "redirect",
+                            "return_url": "https://vk.com/club235442407"
+                        },
+                        "capture": True,
+                        "description": "ALBImusic: стартовый пакет 5 токенов (разовое предложение)",
+                        "metadata": {
+                            "user_id": str(user_id),
+                            "tokens": "5",
+                            "platform": "vk"
+                        }
+                    }, idempotence_key)
+
+                    payment_url = payment.confirmation.confirmation_url
+
+                    # Сохраняем в БД
+                    try:
+                        execute_query_sync(
+                            """INSERT INTO payments (user_id, payment_id, amount, status, platform)
+                               VALUES (%s, %s, %s, 'pending', 'vk')
+                               ON CONFLICT (payment_id) DO NOTHING""",
+                            (user_id, payment.id, 99)
+                        )
+                    except Exception as db_err:
+                        logger.warning(f"⚠️ Ошибка сохранения newcomer_offer платежа: {db_err}")
+
+                    from vk_keyboards import get_payment_keyboard
+                    self.send_message(
+                        user_id=user_id,
+                        message=(
+                            "🎁 Стартовый пакет: 5 токенов за 99₽\n\n"
+                            "👉 Нажмите кнопку ниже для перехода к оплате.\n"
+                            "После оплаты токены зачислятся автоматически!"
+                        ),
+                        keyboard=get_payment_keyboard(payment_url)
+                    )
+                    logger.info(f"✅ Создан newcomer_offer платёж для {user_id}: {payment.id}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка newcomer_offer_pay для {user_id}: {e}")
+                    self.send_message(
+                        user_id=user_id,
+                        message="❌ Ошибка при создании платежа. Попробуйте позже или напишите в поддержку.",
+                        keyboard=self.get_main_keyboard(user_id)
+                    )
+
             # Обработка кнопки "Пригласить друга"
             elif action == "invite_friend":
                 logger.info(f"🌟 Запрос реферальной ссылки от пользователя {user_id}")
@@ -3008,11 +3219,7 @@ class VKBot:
                         
                         logger.info(f"✅ Пользователь {user_id} переведен в режим выбора жанра инструментальной музыки")
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно генераций. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания музыки нужен 1 токен.")
                         logger.warning(f"⚠️ Попытка создания музыки при нулевом балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для создания музыки: {e}")
@@ -3041,11 +3248,7 @@ class VKBot:
                             keyboard=get_version_selection_keyboard(task_id_from_payload, "karaoke")
                         )
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания минусовки нужен 1 токен.")
                         logger.warning(f"⚠️ Попытка создания минусовки при нулевом балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для создания минусовки: {e}")
@@ -3093,11 +3296,7 @@ class VKBot:
                         
                         logger.info(f"✅ Минусовка задача запущена для user {user_id}: {new_task_id}, версия {version+1}")
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания минусовки нужен 1 токен.")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при запуске минусовки: {e}")
                     self.send_message(
@@ -3125,11 +3324,7 @@ class VKBot:
                             keyboard=get_version_selection_keyboard(task_id_from_payload, "wav")
                         )
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Для конвертации в WAV нужно 2 токена. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для конвертации в WAV нужно 2 токена.")
                         logger.warning(f"⚠️ Попытка конвертации в WAV при недостаточном балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для конвертации в WAV: {e}")
@@ -3177,11 +3372,7 @@ class VKBot:
                         
                         logger.info(f"✅ WAV конвертация запущена для user {user_id}: {new_task_id}, версия {version+1}")
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Для конвертации в WAV нужно 2 токена. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для конвертации в WAV нужно 2 токена.")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при запуске WAV конвертации: {e}")
                     self.send_message(
@@ -3207,11 +3398,7 @@ class VKBot:
                             keyboard=get_version_selection_keyboard(task_id_from_payload, "cover")
                         )
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Для создания кавера нужен 1 токен. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания кавера нужен 1 токен.")
                         logger.warning(f"⚠️ Попытка создания кавера при недостаточном балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для кавера: {e}")
@@ -3248,11 +3435,7 @@ class VKBot:
                         )
                         logger.info(f"✅ Пользователь {user_id} получил клавиатуру выбора жанра (версия {version+1}, task_id={task_id_from_payload})")
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Для создания кавера нужен 1 токен. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания кавера нужен 1 токен.")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для кавера: {e}")
                     self.send_message(
@@ -3298,11 +3481,7 @@ class VKBot:
                         
                         logger.info(f"✅ Кавер задача запущена для user {user_id}: {new_task_id}, жанр '{genre}', версия {version+1}")
                     else:
-                        self.send_message(
-                            user_id=user_id,
-                            message="❌ У вас недостаточно токенов. Для создания кавера нужен 1 токен. Пополните баланс!",
-                            keyboard=self.get_main_keyboard(user_id)
-                        )
+                        self._send_no_tokens_message(user_id, "У вас недостаточно токенов. Для создания кавера нужен 1 токен.")
                         logger.warning(f"⚠️ Попытка создания кавера при недостаточном балансе: {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке баланса для кавера: {e}")
