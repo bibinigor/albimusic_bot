@@ -63,6 +63,10 @@ try:
 except Exception as _e:
     logging.error(f"❌ Ошибка создания таблицы support_messages: {_e}")
 
+# Колонки novice_window_started_at и novice_gens_bought добавлены вручную через postgres:
+# ALTER TABLE users ADD COLUMN IF NOT EXISTS novice_window_started_at TIMESTAMP DEFAULT NULL;
+# ALTER TABLE users ADD COLUMN IF NOT EXISTS novice_gens_bought INT DEFAULT 0;
+
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
@@ -293,8 +297,8 @@ def add_payment(user_id, amount, status, payment_id):
     try:
         from db_utils import execute_query_sync
         execute_query_sync(
-            'INSERT INTO payments (user_id, amount, status, payment_id) VALUES (%s, %s, %s, %s)',
-            (user_id, amount, status, payment_id)
+            'INSERT INTO payments (user_id, amount, status, payment_id, platform) VALUES (%s, %s, %s, %s, %s)',
+            (user_id, amount, status, payment_id, 'tg')
         )
         logging.info(f"✅ Платеж {payment_id} добавлен для пользователя {user_id}")
     except Exception as e:
@@ -433,13 +437,33 @@ def get_admin_stats():
 
         # 14. Разбивка оплат за 24 часа по тарифам (amount)
         tariffs_24h_rows = execute_query_sync("""
-            SELECT amount, COUNT(*) 
+            SELECT amount, COUNT(*)
             FROM payments
             WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'
             GROUP BY amount
             ORDER BY amount
         """)
         tariffs_24h = {row[0]: row[1] for row in tariffs_24h_rows} if tariffs_24h_rows else {}
+
+        # 15. Разбивка платежей по платформам (VK / TG) — всего
+        platform_total_rows = execute_query_sync("""
+            SELECT COALESCE(platform, 'tg') as plat, COUNT(*), COALESCE(SUM(amount), 0)
+            FROM payments
+            WHERE status = 'succeeded'
+            GROUP BY plat
+            ORDER BY plat
+        """)
+        platform_total = {row[0]: (row[1], int(row[2])) for row in platform_total_rows} if platform_total_rows else {}
+
+        # 16. Разбивка платежей по платформам (VK / TG) — за 7 дней
+        platform_7d_rows = execute_query_sync("""
+            SELECT COALESCE(platform, 'tg') as plat, COUNT(*), COALESCE(SUM(amount), 0)
+            FROM payments
+            WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+            GROUP BY plat
+            ORDER BY plat
+        """)
+        platform_7d = {row[0]: (row[1], int(row[2])) for row in platform_7d_rows} if platform_7d_rows else {}
 
         return {
             'total_users': total_users,
@@ -463,6 +487,8 @@ def get_admin_stats():
             'count_7days': count_7days,
             'count_total': count_total,
             'tariffs_24h': tariffs_24h,
+            'platform_total': platform_total,
+            'platform_7d': platform_7d,
         }
     except Exception as e:
         logging.error(f"❌ Ошибка получения статистики: {e}")
@@ -486,6 +512,8 @@ def get_admin_stats():
             'count_24h': 0,
             'count_7days': 0,
             'count_total': 0,
+            'platform_total': {},
+            'platform_7d': {},
         }
 def track_first_menu_action(user_id):
     """Фиксирует первое нажатие кнопки главного меню (записывается только один раз)"""
@@ -496,6 +524,37 @@ def track_first_menu_action(user_id):
         )
     except Exception as e:
         logging.error(f"❌ Ошибка track_first_menu_action: {e}")
+
+
+def get_novice_status(user_id):
+    """Возвращает (is_active, hours_left, gens_bought) для 24-часового окна новичка.
+
+    is_active: True если окно активно (novice_window_started_at установлен и < 24ч прошло)
+    hours_left: сколько часов осталось (float)
+    gens_bought: сколько новичковых генераций уже куплено
+    """
+    try:
+        result = execute_query_sync(
+            "SELECT novice_window_started_at, novice_gens_bought FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        if not result or not result[0] or result[0][0] is None:
+            return False, 0.0, 0
+        from datetime import datetime, timezone, timedelta
+        window_started = result[0][0]
+        gens_bought = result[0][1] or 0
+        # Убеждаемся что timezone-aware
+        if window_started.tzinfo is None:
+            window_started = window_started.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        window_end = window_started + timedelta(hours=24)
+        if now < window_end:
+            hours_left = (window_end - now).total_seconds() / 3600
+            return True, round(hours_left, 1), gens_bought
+        return False, 0.0, gens_bought
+    except Exception as e:
+        logging.error(f"❌ get_novice_status error for {user_id}: {e}")
+        return False, 0.0, 0
 
 
 async def create_yookassa_payment(user_id, amount, description, extra_metadata=None):
@@ -717,6 +776,27 @@ async def send_no_tokens_message(user_id, context_text="У вас недоста
         logger.warning(f"⚠️ newcomer_offer check error for {user_id}: {_e}")
         offer_shown = True
 
+    # Проверяем новичковое 24-часовое окно (приоритетнее newcomer_offer)
+    is_novice_active_no, hours_left_no, gens_bought_no = get_novice_status(user_id)
+    if is_novice_active_no and gens_bought_no < 10:
+        remaining_no = 10 - gens_bought_no
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton(
+            f"🎁 Создать ещё песню — 29₽ (⏰ {int(hours_left_no)}ч, осталось {remaining_no} из 10)",
+            callback_data="pay_29_novice"
+        ))
+        markup.add(InlineKeyboardButton("💳 Все тарифы", callback_data="go_to_balance"))
+        await bot.send_message(
+            user_id,
+            f"❌ *{context_text}*\n\n"
+            f"🎁 *У тебя активно специальное окно новичка!*\n\n"
+            f"⏰ Ещё *{int(hours_left_no)} ч* действует цена *29₽ за 1 генерацию* (осталось {remaining_no} из 10).\n\n"
+            f"👇 Нажми кнопку ниже:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        return
+
     if not offer_shown:
         # Ставим флаг ДО отправки — защита от повторного показа при ошибке
         try:
@@ -786,6 +866,16 @@ def get_generation_mode_keyboard():
 
 def get_balance_keyboard(user_id):
     markup = InlineKeyboardMarkup(row_width=1)
+    # Проверяем 24-часовое окно новичка
+    is_novice_active, hours_left, gens_bought = get_novice_status(user_id)
+    if is_novice_active and gens_bought < 10:
+        remaining = 10 - gens_bought
+        markup.add(
+            InlineKeyboardButton(
+                f"🎁 НОВИЧОК: ещё песня — 29₽ ⏰ ({int(hours_left)}ч, осталось {remaining} из 10)",
+                callback_data="pay_29_novice"
+            )
+        )
     markup.add(
         # 🔥 СТАРТОВЫЙ ПАКЕТ — первым, чтобы бросался в глаза
         InlineKeyboardButton("🎁 5 генераций (10 треков) — 99₽ (СТАРТ)", callback_data="pay_99"),
@@ -872,8 +962,9 @@ async def yookassa_webhook(request: Request):
             # ============================================================
             if payment_type_meta == 'unlock_first' and task_id_unlock and user_id:
                 platform_meta = payment.get('metadata', {}).get('platform', 'telegram')
-                logging.info(f"🔓 Оплата разблокировки первой генерации: user={user_id}, task={task_id_unlock}, platform={platform_meta}")
-                add_payment(user_id, 50.0, 'succeeded', payment_id)
+                _unlock_amount = float(payment.get('amount', {}).get('value', 50.0))
+                logging.info(f"🔓 Оплата разблокировки первой генерации: user={user_id}, task={task_id_unlock}, platform={platform_meta}, amount={_unlock_amount}₽")
+                add_payment(user_id, _unlock_amount, 'succeeded', payment_id)
 
                 # Разблокируем трек в БД
                 execute_query_sync(
@@ -982,6 +1073,41 @@ async def yookassa_webhook(request: Request):
 
             amount = float(payment.get('amount', {}).get('value', 0))
             if user_id and amount:
+                # ============================================================
+                # Специальная обработка: платёж novice_gen (29₽ за 1 токен)
+                # ============================================================
+                payment_type_novice = payment.get('metadata', {}).get('payment_type', '')
+                if payment_type_novice == 'novice_gen' and user_id:
+                    _nov_amount = float(payment.get('amount', {}).get('value', 29.0))
+                    add_balance(user_id, 1)
+                    add_payment(user_id, _nov_amount, 'succeeded', payment.get('id'))
+                    # Инкрементируем счётчик новичковых генераций
+                    execute_query_sync(
+                        "UPDATE users SET novice_gens_bought = COALESCE(novice_gens_bought, 0) + 1 WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    logging.info(f"✅ novice_gen: +1 токен пользователю {user_id}, сумма={_nov_amount}₽")
+                    # Уведомляем
+                    async def _notify_novice_gen(uid=user_id):
+                        try:
+                            inline_kb = InlineKeyboardMarkup(row_width=2)
+                            inline_kb.add(
+                                InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
+                                InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
+                            )
+                            await bot.send_message(
+                                int(uid),
+                                "🎁 *Оплата прошла! +1 генерация (2 трека)*\n\n"
+                                "✅ Начислен 1 токен — создавай свою следующую песню!\n\n"
+                                "Нажми кнопку ниже чтобы начать 👇",
+                                reply_markup=inline_kb,
+                                parse_mode="Markdown"
+                            )
+                        except Exception as _ne:
+                            logging.error(f"❌ Ошибка уведомления novice_gen {uid}: {_ne}")
+                    asyncio.create_task(_notify_novice_gen())
+                    return JSONResponse({"status": "ok"})
+
                 # Определяем количество токенов по сумме
                 amount_to_tokens = {
                     99.00: 5,
@@ -995,6 +1121,7 @@ async def yookassa_webhook(request: Request):
                     3990.00: 140,
                     4000.00: 140,
                     # Совместимость со старыми ценами
+                    29.00: 1,   # новичковая разблокировка
                     50.00: 1,
                     100.00: 1,
                 }
@@ -1216,19 +1343,32 @@ async def handle_balance(message: types.Message, state: FSMContext):
     await state.finish()
     track_first_menu_action(message.from_user.id)
 
-    balance = get_user_balance(message.from_user.id)
+    user_id_bal = message.from_user.id
+    balance = get_user_balance(user_id_bal)
+    # Проверяем новичковое окно
+    is_novice_active, hours_left_bal, gens_bought_bal = get_novice_status(user_id_bal)
+    if is_novice_active and gens_bought_bal < 10:
+        remaining_bal = 10 - gens_bought_bal
+        novice_block = (
+            f"\n🎁 *СПЕЦИАЛЬНАЯ ЦЕНА ДЛЯ НОВИЧКА (⏰ ещё {int(hours_left_bal)} ч):*\n"
+            f"🔥 *29₽ за 1 генерацию* — доступно ещё {remaining_bal} из 10!\n"
+            f"После истечения 24ч — стандартные цены от 99₽.\n"
+        )
+    else:
+        novice_block = ""
     text = (
         f"💰 *Ваш баланс:* {balance}\n\n"
-        f"💳 *Пополнить баланс:*\n\n"
-        f"🎁 *5 генераций \(10 треков\) — 99₽* ← старт\!\n"
-        f"💳 10 генераций \(20 треков\) — 490₽\n"
-        f"🔥 25 генераций \(50 треков\) — 990₽ \(ХИТ\!\)\n"
-        f"⭐ 60 генераций \(120 треков\) — 1990₽\n"
-        f"💎 140 генераций \(280 треков\) — 3990₽\n\n"
-        f"🌟 *Пригласи друга* — получи 2 токена бесплатно\!\n\n"
-        f"🎵 Вдохновение — в нашем канале: @ALBImusic\_chart"
+        f"💳 *Пополнить баланс:*\n"
+        f"{novice_block}\n"
+        f"🎁 *5 генераций (10 треков) — 99₽* ← старт!\n"
+        f"💳 10 генераций (20 треков) — 490₽\n"
+        f"🔥 25 генераций (50 треков) — 990₽ (ХИТ!)\n"
+        f"⭐ 60 генераций (120 треков) — 1990₽\n"
+        f"💎 140 генераций (280 треков) — 3990₽\n\n"
+        f"🌟 *Пригласи друга* — получи 2 токена бесплатно!\n\n"
+        f"🎵 Вдохновение — в нашем канале: @ALBImusic\\_chart"
     )
-    await message.answer(text, reply_markup=get_balance_keyboard(message.from_user.id), parse_mode="Markdown")
+    await message.answer(text, reply_markup=get_balance_keyboard(user_id_bal), parse_mode="Markdown")
 
 @dp.message_handler(lambda message: message.text == "📂 Мои треки", state='*')
 async def handle_my_tracks(message: types.Message, state: FSMContext):
@@ -1236,9 +1376,24 @@ async def handle_my_tracks(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     track_first_menu_action(user_id)
 
-    # Получаем последние 20 генераций
+    # Получаем последние 20 генераций.
+    # Используем LEFT JOIN с demo_tracks чтобы показывать треки даже если статус в
+    # generations был испорчен (например, из-за бага ERROR_NOTIFIED).
     tracks = execute_query_sync(
-        "SELECT task_id, prompt, audio_url, created_at, status FROM generations WHERE user_id = %s AND status = 'completed' ORDER BY created_at DESC LIMIT 20",
+        """
+        SELECT g.task_id, g.prompt,
+               COALESCE(dt.full_url_1, g.audio_url) AS audio_url,
+               g.created_at, g.status
+        FROM generations g
+        LEFT JOIN demo_tracks dt ON dt.task_id = g.task_id AND dt.user_id = g.user_id
+        WHERE g.user_id = %s
+          AND (
+              g.status = 'completed'
+              OR dt.task_id IS NOT NULL
+          )
+        ORDER BY g.created_at DESC
+        LIMIT 20
+        """,
         (user_id,)
     )
 
@@ -2175,6 +2330,7 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
     if tariffs_24h:
         amount_to_tokens = {
             50: 1,
+            99: 5,
             250: 10,
             500: 25,
             1000: 60,
@@ -2190,6 +2346,14 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
         tariffs_24h_text = "\n".join(tariff_lines)
     else:
         tariffs_24h_text = "• нет оплат за 24ч"
+
+    # Разбивка по платформам
+    platform_total = stats.get("platform_total", {}) or {}
+    platform_7d = stats.get("platform_7d", {}) or {}
+    vk_total_cnt, vk_total_sum = platform_total.get('vk', (0, 0))
+    tg_total_cnt, tg_total_sum = platform_total.get('tg', (0, 0))
+    vk_7d_cnt, vk_7d_sum = platform_7d.get('vk', (0, 0))
+    tg_7d_cnt, tg_7d_sum = platform_7d.get('tg', (0, 0))
 
     text = f"""📊 *Статистика бота:*
 
@@ -2209,7 +2373,11 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
     🔍 По тарифам (24ч):
 {tariffs_24h_text}
 📆 За 7 дней: {stats.get("count_7days", 0)} платежей · {stats.get("sum_7days", 0)}₽
+    📱 VK: {vk_7d_cnt} платежей · {vk_7d_sum}₽
+    ✈️ TG: {tg_7d_cnt} платежей · {tg_7d_sum}₽
 📊 Всего: {stats.get("count_total", 0)} платежей · {stats.get("sum_total", 0)}₽
+    📱 VK: {vk_total_cnt} платежей · {vk_total_sum}₽
+    ✈️ TG: {tg_total_cnt} платежей · {tg_total_sum}₽
 
 👥 Приглашенных сегодня: {stats.get("invited_today", 0)}"""
 
@@ -2581,7 +2749,7 @@ async def process_play_track(callback_query: types.CallbackQuery):
         if not url or url.startswith('ALREADY_'):
             continue
         try:
-            caption = f"🎼 Версия {idx}" if is_unlocked else f"🎧 Демо {idx} (60 сек)"
+            caption = f"🎼 Версия {idx}" if is_unlocked else f"🎧 Демо {idx} (45 сек)"
             await bot.send_audio(user_id, url, caption=caption, title=f"AI Music v{idx}", performer="ALBI Music")
             sent += 1
         except Exception as e:
@@ -2613,24 +2781,33 @@ async def process_play_track(callback_query: types.CallbackQuery):
         user_has_paid = paid_check and paid_check[0][0] > 0
 
         if not user_has_paid:
-            # Первая генерация / нет платёжной истории → предлагаем 50₽
+            # Проверяем новичковое окно — если активно, цена 29₽, иначе 50₽
+            _is_novice_play, _hours_play, _gens_play = get_novice_status(user_id)
+            if _is_novice_play:
+                _unlock_price_label = f"29₽ ⏰ (ещё {int(_hours_play)}ч!)"
+                _unlock_cb = f"pay_unlock_29_{task_id}"
+                _price_note = f"\n\n⏰ *Цена 29₽ действует только {int(_hours_play)}ч — потом стандартная цена*"
+            else:
+                _unlock_price_label = "50₽"
+                _unlock_cb = f"pay_unlock_50_{task_id}"
+                _price_note = ""
             info_text = (
-                "🎧 **Это 60-секундное демо**\n\n"
-                "🔓 Разблокируй полную версию за **50₽** — без ограничений по времени!\n\n"
+                "🎧 **Это 45-секундное демо**\n\n"
+                f"🔓 Разблокируй полную версию за **{_unlock_price_label}** — без ограничений по времени!\n\n"
                 "**Что получишь после оплаты:**\n"
                 "🎤 **Минусовка** — версия без вокала\n"
                 "🎸 **Кавер** — перепой в другом стиле\n"
                 "🎵 **В WAV** — профессиональный формат\n"
                 "📢 **В канал** — поделись с другими!\n"
-                "🔗 **Скачать** — сохрани трек навсегда"
+                f"🔗 **Скачать** — сохрани трек навсегда{_price_note}"
             )
             markup.add(
-                InlineKeyboardButton("🔓 Получить ПОЛНУЮ версию — 50₽", callback_data=f"pay_unlock_50_{task_id}")
+                InlineKeyboardButton(f"🔓 Получить ПОЛНУЮ версию — {_unlock_price_label}", callback_data=_unlock_cb)
             )
         else:
             # Пользователь уже платил — предлагаем 1 токен
             info_text = (
-                "🎧 **Это 60-секундное демо**\n\n"
+                "🎧 **Это 45-секундное демо**\n\n"
                 "🔓 Разблокируй полные версии за **1 токен** — без ограничений по времени!\n\n"
                 "**Что ещё можно сделать:**\n"
                 "🎤 **Минусовка** — версия без вокала для исполнения\n"
@@ -3493,6 +3670,63 @@ async def process_unlock_full_versions(callback_query: types.CallbackQuery, stat
     logger.info(f"✅ Разблокированы полные версии: user {user_id}, task {task_id}")
 
 
+@dp.callback_query_handler(lambda c: c.data.startswith('pay_unlock_29_'), state='*')
+async def process_pay_unlock_first_gen_29(callback_query: types.CallbackQuery, state: FSMContext):
+    """Создаёт платёж ЮKassa 29₽ для разблокировки первой (демо) генерации (новичковое окно 24ч)"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+    task_id = callback_query.data.replace('pay_unlock_29_', '')
+
+    # Проверяем — вдруг уже разблокирован (двойной клик)
+    demo_check = execute_query_sync(
+        "SELECT is_unlocked FROM demo_tracks WHERE task_id = %s AND user_id = %s",
+        (task_id, user_id)
+    )
+    if demo_check and demo_check[0] and demo_check[0][0]:
+        await callback_query.answer("✅ Этот трек уже разблокирован!", show_alert=True)
+        return
+
+    # Проверяем: окно ещё активно?
+    is_novice_active_ul, hours_left_ul, _ = get_novice_status(user_id)
+    unlock_price = 29 if is_novice_active_ul else 50
+    timer_text = f"\n\n⏰ Специальная цена {unlock_price}₽ ещё {int(hours_left_ul)} ч! Потом — от 99₽." if is_novice_active_ul else ""
+
+    payment = await create_yookassa_payment(
+        user_id,
+        unlock_price,
+        f"Разблокировка полной версии трека ALBI Music ({unlock_price}₽ — новичковое окно)",
+        {"payment_type": "unlock_first", "task_id": task_id}
+    )
+
+    if payment and payment.get('confirmation', {}).get('confirmation_url'):
+        payment_url = payment['confirmation']['confirmation_url']
+        payment_id = payment['id']
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(f"💳 Оплатить {unlock_price}₽ — получить полную версию", url=payment_url))
+        markup.add(InlineKeyboardButton("🎧 Послушать демо ещё раз", callback_data=f"play_{task_id}"))
+
+        await bot.send_message(
+            user_id,
+            f"🔓 *Разблокировка полной версии трека*\n\n"
+            f"💰 Стоимость: *{unlock_price}₽* — разовый платёж{timer_text}\n\n"
+            "✅ После оплаты ты получишь:\n"
+            "• Оба трека без ограничения по времени\n"
+            "• Кнопки «Послушать» и «Скачать»\n"
+            "• Минусовку, Кавер, WAV и всё остальное\n\n"
+            "👇 Нажми кнопку ниже для оплаты:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        logging.info(f"💳 Создан платёж unlock_first {unlock_price}₽: user={user_id}, task={task_id}, payment_id={payment_id}")
+    else:
+        await bot.send_message(
+            user_id,
+            "❌ Не удалось создать платёж. Попробуйте ещё раз или обратитесь в поддержку.",
+        )
+        logging.error(f"❌ Ошибка создания платежа unlock_first: user={user_id}, task={task_id}")
+
+
 @dp.callback_query_handler(lambda c: c.data.startswith('pay_unlock_50_'), state='*')
 async def process_pay_unlock_first_gen(callback_query: types.CallbackQuery, state: FSMContext):
     """Создаёт платёж ЮKassa 50₽ для разблокировки первой (демо) генерации"""
@@ -3547,6 +3781,69 @@ async def process_pay_unlock_first_gen(callback_query: types.CallbackQuery, stat
 
 
 # ============================================================
+# ОБРАБОТЧИК: новичковая генерация (1 токен за 29₽, 24 часового окно, лимит 10 шт)
+# ============================================================
+@dp.callback_query_handler(lambda c: c.data == 'pay_29_novice', state='*')
+async def process_pay_29_novice(callback_query: types.CallbackQuery, state: FSMContext):
+    """Создаёт платёж YooKassa 29₽ → 1 токен (новичковое 24-часовое окно, до 10 покупок)"""
+    await bot.answer_callback_query(callback_query.id)
+    user_id = callback_query.from_user.id
+
+    # Проверяем, что окно ещё активно и лимит не исчерпан
+    is_novice_active_np, hours_left_np, gens_bought_np = get_novice_status(user_id)
+    if not is_novice_active_np:
+        await bot.send_message(
+            user_id,
+            "⏰ *Специальная цена 29₽ закончилась.*\n\n"
+            "Твоё 24-часовое новичковое окно истекло.\n"
+            "Теперь доступны стандартные пакеты 👇",
+            reply_markup=get_balance_keyboard(user_id),
+            parse_mode="Markdown"
+        )
+        return
+
+    if gens_bought_np >= 10:
+        await bot.send_message(
+            user_id,
+            "✅ Ты уже воспользовался максимальным количеством новичковых генераций (10 из 10)!\n\n"
+            "Теперь доступны стандартные пакеты 👇",
+            reply_markup=get_balance_keyboard(user_id),
+            parse_mode="Markdown"
+        )
+        return
+
+    remaining_np = 10 - gens_bought_np
+    logging.info(f"🎁 Новичковая генерация 29₽: user={user_id}, куплено={gens_bought_np}, осталось={remaining_np}")
+
+    payment = await create_yookassa_payment(
+        user_id,
+        29,
+        "1 генерация — Подарок новичку ALBI Music",
+        {"payment_type": "novice_gen"}
+    )
+    if payment and payment.get('confirmation', {}).get('confirmation_url'):
+        payment_url = payment['confirmation']['confirmation_url']
+        payment_id = payment['id']
+        add_payment(user_id, 29, 'pending', payment_id)
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("💳 Оплатить 29₽ — получить 1 генерацию (2 трека)", url=payment_url))
+        await bot.send_message(
+            user_id,
+            f"🎁 *Подарок новичку — 1 генерация за 29₽*\n\n"
+            f"⏰ Ещё {int(hours_left_np)} ч действует специальная цена.\n"
+            f"Осталось: {remaining_np} из 10 новичковых генераций.\n\n"
+            "✅ После оплаты баланс пополнится автоматически!\n"
+            "1 генерация = 2 трека (2 варианта вашей песни)\n\n"
+            "👇 Нажми кнопку для оплаты:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        logging.info(f"✅ Создан novice_gen платёж для {user_id}: {payment_id}")
+    else:
+        await bot.send_message(user_id, "❌ Ошибка при создании платежа. Попробуйте позже.")
+        logging.error(f"❌ Ошибка pay_29_novice для {user_id}")
+
+
 # ОБРАБОТЧИК: разовое предложение новичку (5 токенов за 99₽)
 # ============================================================
 @dp.callback_query_handler(lambda c: c.data == 'newcomer_offer_pay', state='*')

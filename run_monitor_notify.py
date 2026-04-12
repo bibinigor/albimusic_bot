@@ -3,6 +3,7 @@ import logging
 import sys
 import os
 import time
+import socket
 
 # Добавляем путь к проекту
 sys.path.append('/root/albimusic-bot')
@@ -26,6 +27,17 @@ import subprocess
 import tempfile
 import os
 import aiohttp
+
+
+async def create_bot_ipv4(token):
+    """
+    Создаёт Bot через SOCKS5 прокси (127.0.0.1:9050 — Tor).
+    Исправляет ошибку: Cannot connect to host api.telegram.org — аналогично main_with_payments.py.
+    """
+    from aiogram import Bot
+    # Используем тот же socks5 прокси, что и основной бот (main_with_payments.py)
+    bot = Bot(token=token, proxy='socks5://127.0.0.1:9050')
+    return bot
 
 async def download_and_cut_audio(url, duration=60):
     """
@@ -93,11 +105,10 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
     """Отправка ДЕМО аудио файлов (45 сек) с кнопкой разблокировки"""
     try:
         import json
-        from aiogram import Bot
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         from db_utils import execute_query_sync
 
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = await create_bot_ipv4(TELEGRAM_BOT_TOKEN)
 
         # Парсим JSON массив ссылок
         audio_urls = []
@@ -304,21 +315,21 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
         is_first_generation = (completed_count == 1)
 
         if is_first_generation:
-            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ДЕМО 60 сек + предложение разблокировки за 50₽")
+            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ДЕМО 45 сек + предложение разблокировки за 29₽")
             header = "🎤 Ваша первая песня готова! 🎁" if is_song else "🎵 Ваша первая музыка готова! 🎁"
             await bot.send_message(chat_id=user_id, text=header, parse_mode="Markdown")
 
-            # Отправляем 60-секундное демо (без полного трека)
+            # Отправляем 45-секундное демо (без полного трека)
             demo_paths = []
             for idx, url in enumerate(audio_urls[:2], 1):
                 try:
-                    demo_path = await download_and_cut_audio(url, duration=60)
+                    demo_path = await download_and_cut_audio(url, duration=45)
                     if demo_path:
                         with open(demo_path, 'rb') as audio_file:
                             await bot.send_audio(
                                 chat_id=user_id,
                                 audio=audio_file,
-                                caption=f"🎼 Демо — Версия {idx} (60 сек)",
+                                caption=f"🎼 Демо — Версия {idx} (45 сек)",
                                 title=f"AI Music Demo v{idx}",
                                 performer="ALBI Music"
                             )
@@ -340,6 +351,17 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
                 logger.info(f"💾 Первая генерация сохранена в demo_tracks (unlocked=False): {task_id}")
             except Exception as e:
                 logger.error(f"❌ Ошибка сохранения первой генерации в demo_tracks: {e}")
+
+            # ✅ Запускаем 24-часовое окно новичка (novice window)
+            try:
+                execute_query_sync(
+                    "UPDATE users SET novice_window_started_at = NOW() "
+                    "WHERE user_id = %s AND novice_window_started_at IS NULL",
+                    (user_id,)
+                )
+                logger.info(f"⏰ 24-часовое окно новичка запущено для user {user_id}")
+            except Exception as _nw:
+                logger.warning(f"⚠️ Ошибка записи novice_window_started_at для {user_id}: {_nw}")
 
             # ✅ TG П4: Начисляем реферальный бонус пригласившему при первой генерации
             try:
@@ -370,11 +392,11 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
             except Exception as _ref_e:
                 logger.warning(f"⚠️ TG referral bonus error for user {user_id}: {_ref_e}")
 
-            # Кнопки: только «Послушать» и «Разблокировать за 50₽» — без «Скачать» и прочих функций
+            # Кнопки: только «Послушать» и «Разблокировать за 29₽» (первые 24 часа) — без «Скачать» и прочих функций
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
-                    text="🔓 Получить ПОЛНУЮ версию — 50₽",
-                    callback_data=f"pay_unlock_50_{task_id}"
+                    text="🔓 Получить ПОЛНУЮ версию — 29₽ ⏰ (только 24 часа!)",
+                    callback_data=f"pay_unlock_29_{task_id}"
                 )],
                 [InlineKeyboardButton(
                     text="🎧 Послушать ещё раз",
@@ -388,12 +410,14 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
             await bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "🎧 *Это демо твоей первой песни (60 секунд)*\n\n"
+                    "🎧 *Это демо твоей первой песни (45 секунд)*\n\n"
                     "⚠️ Это только Preview — полная версия длиннее!\n\n"
-                    "🔓 *Разблокируй полную версию за 50₽:*\n"
+                    "🔓 *Разблокируй полную версию за 29₽:*\n"
                     "• Оба трека без ограничений по времени\n"
                     "• Кнопки «Послушать» и «Скачать»\n"
                     "• Минусовка, Кавер, WAV и многое другое\n\n"
+                    "⏰ *Цена 29₽ действует только 24 часа с момента создания первой песни!*\n"
+                    "После — стандартная цена от 99₽.\n\n"
                     "👇 Нажми кнопку ниже:"
                 ),
                 reply_markup=keyboard,
@@ -636,9 +660,7 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
 async def send_error_notification(user_id, task_id, prompt=None):
     """Отправка уведомления об ошибке генерации"""
     try:
-        from aiogram import Bot
-        
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = await create_bot_ipv4(TELEGRAM_BOT_TOKEN)
         
         message_text = "❌ К сожалению, генерация не удалась.\n\n"
         if prompt:
@@ -660,10 +682,9 @@ async def send_error_notification(user_id, task_id, prompt=None):
 async def send_novice_offer(user_id: int):
     """Отправляет предложение пакета «Новичок» через 3 минуты после первой песни"""
     try:
-        from aiogram import Bot
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = await create_bot_ipv4(TELEGRAM_BOT_TOKEN)
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
             InlineKeyboardButton("⏳ Забрать 5 треков за 99₽", callback_data="pay_99_novice")
@@ -765,6 +786,68 @@ async def check_and_clean_duplicates():
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке дубликатов: {e}")
 
+# Множество задач, которым уже отправили "ещё генерируется"
+_progress_notified: set = set()
+
+
+async def check_long_running_generations():
+    """
+    Ищет генерации с status='processing' дольше 3 минут и отправляет пользователю
+    одно промежуточное уведомление «ещё работаем», чтобы не беспокоился.
+    Это решает жалобы типа «почему так долго / нет трека».
+    """
+    global _progress_notified
+    try:
+        long_running = execute_query_sync(
+            """
+            SELECT task_id, user_id, created_at
+            FROM generations
+            WHERE status = 'processing'
+              AND created_at < NOW() - INTERVAL '3 minutes'
+              AND created_at > NOW() - INTERVAL '20 minutes'
+            LIMIT 20
+            """
+        )
+        if not long_running:
+            return
+
+        for task_id, user_id, created_at in long_running:
+            if task_id in _progress_notified:
+                continue
+            try:
+                import datetime
+                elapsed_sec = (
+                    (datetime.datetime.utcnow() - created_at.replace(tzinfo=None)).total_seconds()
+                    if hasattr(created_at, 'replace') else 180
+                )
+                elapsed_min = max(1, int(elapsed_sec / 60))
+
+                bot = await create_bot_ipv4(TELEGRAM_BOT_TOKEN)
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⏳ Ваш трек всё ещё создаётся...\n\n"
+                        f"🎵 AI уже работает над вашей музыкой {elapsed_min}+ мин — "
+                        f"это нормально для сложных запросов!\n\n"
+                        f"Как только трек будет готов — мы сразу отправим его вам 🎶\n"
+                        f"Обычно генерация занимает 2–7 минут."
+                    )
+                )
+                await bot.close()
+                _progress_notified.add(task_id)
+                logger.info(f"⏳ Progress notification sent: user={user_id}, task={task_id}, elapsed={elapsed_min}m")
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error(f"❌ Progress notify failed for user {user_id} task {task_id}: {e}")
+
+        # Чистим память: убираем из множества те задачи, которые уже завершились
+        if len(_progress_notified) > 200:
+            _progress_notified = set(list(_progress_notified)[-100:])
+
+    except Exception as e:
+        logger.error(f"❌ check_long_running_generations error: {e}")
+
+
 async def monitor_generations():
     """Основная функция мониторинга"""
     # Инициализируем пул подключений к БД
@@ -821,12 +904,15 @@ async def monitor_generations():
                             )
                             logger.info(f"✅ Уведомление для задачи {task_id} отправлено и помечено в БД")
                         else:
-                            # Ошибка отправки - помечаем как ERROR_NOTIFIED чтобы не пытаться снова
-                            execute_query_sync(
-                                "UPDATE generations SET audio_url = 'ERROR_NOTIFIED', status = 'error' WHERE task_id = %s",
-                                (task_id,)
+                            # ИСПРАВЛЕНИЕ: При ошибке отправки НЕ перезаписываем audio_url и НЕ меняем статус.
+                            # Раньше здесь был баг: audio_url заменялся на 'ERROR_NOTIFIED',
+                            # что уничтожало ссылку на готовую песню пользователя.
+                            # Теперь убираем задачу из sent_notifications → монитор повторит попытку.
+                            sent_notifications.discard(task_id)
+                            logger.error(
+                                f"❌ Не удалось отправить уведомление для задачи {task_id} "
+                                f"(вероятно, проблема сети). audio_url сохранён — будет повтор через 10 сек."
                             )
-                            logger.error(f"❌ Не удалось отправить уведомление для задачи {task_id}, помечено как ERROR_NOTIFIED")
             
             # Очищаем старые уведомления (чтобы не накапливать память)
             if len(sent_notifications) > 100:
@@ -836,6 +922,9 @@ async def monitor_generations():
             
             # Проверяем отложенные офферы для новичков (через 3 мин после первой песни)
             await check_and_send_novice_offers()
+
+            # Уведомляем пользователей, у которых генерация идёт >3 мин без ответа
+            await check_long_running_generations()
 
             # Пауза между проверками
             await asyncio.sleep(10)
