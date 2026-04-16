@@ -376,28 +376,60 @@ def get_newcomer_offer_keyboard():
     return keyboard
 
 def get_payment_tariffs_keyboard():
-    """Клавиатура с тарифами оплаты (inline-кнопки с callback)"""
+    """Клавиатура с тарифами оплаты (inline-кнопки с callback).
+    
+    Максимум 5 строк для inline-клавиатуры VK API.
+    Строка 1: стартовый пакет (отдельно, выделен)
+    Строка 2: 1 токен + 10 токенов
+    Строка 3: 25 токенов + 60 токенов
+    Строка 4: 140 токенов
+    Строка 5: пригласить друга
+    """
     keyboard = VkKeyboard(inline=True)
 
-    # Тарифы синхронизированы с Telegram-ботом
-    tariffs = [
-        ("🎁 5 токенов — 99₽ (старт)", 99),   # ← стартовый пакет вверху
-        ("💫 1 токен — 50₽", 50),
-        ("💳 10 токенов — 250₽", 250),
-        ("🔥 25 токенов — 500₽", 500),
-        ("⭐ 60 токенов — 1000₽", 1000),
-        ("💎 140 токенов — 2000₽", 2000)
-    ]
+    # Строка 1: стартовый пакет — выделен красным
+    keyboard.add_callback_button(
+        label="🎁 5 токенов — 99₽ (старт)",
+        color=VkKeyboardColor.NEGATIVE,
+        payload=json.dumps({"action": "payment", "amount": 99})
+    )
+    keyboard.add_line()
 
-    for label, amount in tariffs:
-        keyboard.add_callback_button(
-            label=label,
-            color=VkKeyboardColor.POSITIVE,
-            payload=json.dumps({"action": "payment", "amount": amount})
-        )
-        keyboard.add_line()
+    # Строка 2: два малых тарифа
+    keyboard.add_callback_button(
+        label="💫 1 токен — 50₽",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "payment", "amount": 50})
+    )
+    keyboard.add_callback_button(
+        label="💳 10 токенов — 250₽",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "payment", "amount": 250})
+    )
+    keyboard.add_line()
 
-    # Кнопка приглашения друга
+    # Строка 3: два средних тарифа
+    keyboard.add_callback_button(
+        label="🔥 25 токенов — 500₽",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "payment", "amount": 500})
+    )
+    keyboard.add_callback_button(
+        label="⭐ 60 токенов — 1000₽",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "payment", "amount": 1000})
+    )
+    keyboard.add_line()
+
+    # Строка 4: максимальный тариф
+    keyboard.add_callback_button(
+        label="💎 140 токенов — 2000₽",
+        color=VkKeyboardColor.POSITIVE,
+        payload=json.dumps({"action": "payment", "amount": 2000})
+    )
+    keyboard.add_line()
+
+    # Строка 5: пригласить друга
     keyboard.add_callback_button(
         label="🌟 Пригласить друга (+2 токена)",
         color=VkKeyboardColor.PRIMARY,
@@ -521,5 +553,54 @@ def get_music_result_keyboard(urls, task_id=None, suno_ids=None):
 
         if i < len(url_list):
             keyboard.add_line()
+
+    return keyboard
+
+
+def get_lyrics_review_keyboard(rewrite_count=0, lyrics_history=None):
+    """
+    Клавиатура просмотра AI-текста песни (новый пайплайн через Gemini).
+
+    Показывается после генерации текста Gemini.
+    - Кнопка «Создать песню» — отправить текст в Suno (зелёная).
+    - Кнопка «Переписать текст» — запросить новый вариант.
+      Первые 3 раза бесплатно, далее 1 токен — отражается в подписи кнопки.
+    - Кнопки «📋 Вариант N» — показываются, если есть история (до 3 вариантов).
+
+    Args:
+        rewrite_count: сколько переписываний уже использовано (0, 1, 2, …)
+        lyrics_history: список сохранённых текстов-вариантов (до 3 штук)
+    """
+    if lyrics_history is None:
+        lyrics_history = []
+
+    keyboard = VkKeyboard(inline=True)
+
+    # ── Кнопка «Создать песню» ──────────────────────────────────────────────
+    keyboard.add_button('🎵 Создать песню', color=VkKeyboardColor.POSITIVE)
+
+    # ── Кнопка «Переписать текст» с индикатором бесплатных попыток ─────────
+    FREE_REWRITES = 3
+    if rewrite_count < FREE_REWRITES:
+        remaining = FREE_REWRITES - rewrite_count
+        rewrite_label = f'🔄 Переписать текст (бесплатно: {remaining} из {FREE_REWRITES})'
+    else:
+        rewrite_label = '🔄 Переписать текст (1 🪙 токен)'
+
+    keyboard.add_line()
+    keyboard.add_button(rewrite_label, color=VkKeyboardColor.PRIMARY)
+
+    # ── Кнопки истории вариантов ────────────────────────────────────────────
+    # Показываем кнопки предыдущих вариантов (не текущего — он уже на экране)
+    if len(lyrics_history) > 0:
+        keyboard.add_line()
+        for idx in range(len(lyrics_history)):
+            variant_num = idx + 1
+            btn_label = f'📋 Вариант {variant_num}'
+            keyboard.add_button(btn_label, color=VkKeyboardColor.SECONDARY)
+            # VK inline-клавиатура: максимум 40 символов на кнопку, 5 кнопок в строке
+            # Разбиваем на строки по 2 кнопки истории
+            if (idx + 1) % 2 == 0 and idx < len(lyrics_history) - 1:
+                keyboard.add_line()
 
     return keyboard

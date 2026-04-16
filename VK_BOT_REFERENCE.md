@@ -23,6 +23,7 @@ VK-группа ID: **235442407**
 | **Поддержка** | `/root/albimusic-bot/vk_support.py` |
 | **Демо-система** | `/root/albimusic-bot/vk_demo_system.py` |
 | **Python venv** | `/root/albimusic-bot/venv/` (общий с Telegram) |
+| **Сервис systemd** | `/etc/systemd/system/albimusic-vk-bot.service` |
 
 ---
 
@@ -84,6 +85,8 @@ ps aux | grep main_vk.py | grep -v grep | wc -l
 | `DB_USER` | `albimusic_user` |
 | `REDIS_URL` | `redis://localhost:6379/0` |
 | `SUNO_API_URL` | `https://api.sunoapi.org` |
+| `OPENROUTER_API_KEY` | задаётся в systemd-сервисе как `Environment=` |
+| `OPENROUTER_MODEL` | `google/gemini-2.0-flash-001` (Gemini 2.0 Flash) |
 
 ---
 
@@ -161,3 +164,92 @@ systemctl status albimusic-celery
 | `vk_states.py` | `systemctl restart albimusic-vk-bot` |
 | `celery_tasks.py` | `systemctl restart celery-worker && systemctl restart albimusic-celery` |
 | `db_utils.py` | `systemctl restart albimusic-vk-bot` |
+| `/etc/systemd/system/albimusic-vk-bot.service` | `systemctl daemon-reload && systemctl restart albimusic-vk-bot` |
+
+---
+
+## 🤖 Gemini-пайплайн генерации текстов (v2, апрель 2026)
+
+### Что изменилось
+
+Раньше тексты песен генерировал Suno через `/api/v1/lyrics` — качество на русском было плохим (глагольные рифмы, несуществующие слова, нет ритма). Теперь тексты пишет **Gemini 2.0 Flash** через OpenRouter API.
+
+### Новый флоу для пользователя
+
+```
+Создать песню → 🤖 AI-текст
+       ↓
+Бот: "Напишите о чём песня и в каком жанре одним сообщением"
+       ↓
+Пользователь: "про кота Василия в стиле панк-рок"
+       ↓
+Бот: "✍️ Пишу стихи..." (мгновенно, не блокирует бота)
+       ↓ (5-15 секунд в отдельном потоке)
+Gemini генерирует: текст песни + стиль для Suno
+       ↓
+Бот показывает текст + кнопки:
+  [🎵 Создать песню]  [🔄 Переписать текст (бесплатно: 3 из 3)]
+  [📋 Вариант 1] [📋 Вариант 2]  ← после переписываний
+       ↓ при нажатии "Создать песню"
+Suno делает музыку (3-5 мин) → готовый трек
+```
+
+### Лимиты переписываний
+
+- **3 бесплатных** переписывания на одну идею
+- Далее **1 токен** за каждое
+- История хранит до 3 предыдущих вариантов — кнопки «📋 Вариант N»
+
+### Автофолбэк при проблемах с OpenRouter
+
+Если OpenRouter недоступен (нет денег, сбой):
+1. Бот **автоматически** переключается на старый Suno Lyrics API
+2. Пользователь не видит ошибки — текст приходит (чуть хуже)
+3. Если оба недоступны — вежливое сообщение об ошибке
+
+**Мониторинг баланса OpenRouter:**
+```bash
+# Смотреть в реальном времени — появится CRITICAL при нехватке средств
+journalctl -u albimusic-vk-bot -f | grep -iE "OPENROUTER|FALLBACK|CRITICAL|💳"
+```
+
+### Где находится код
+
+| Что | Файл | Место |
+|-----|------|-------|
+| Функция генерации текста через Gemini | `celery_tasks.py` | `generate_lyrics_via_gemini()` |
+| Поток генерации (threading) | `main_vk.py` | обработчик `States.WAITING_SONG_IDEA` |
+| Обработчик кнопок просмотра текста | `main_vk.py` | обработчик `States.REVIEWING_LYRICS` |
+| Клавиатура с кнопками и историей | `vk_keyboards.py` | `get_lyrics_review_keyboard()` |
+| Ключ API OpenRouter | `/etc/systemd/system/albimusic-vk-bot.service` | `Environment=OPENROUTER_API_KEY=...` |
+
+### Как сменить модель
+
+В `/etc/systemd/system/albimusic-vk-bot.service` изменить строку:
+```
+Environment="OPENROUTER_MODEL=google/gemini-2.0-flash-001"
+```
+Доступные варианты (через openrouter.ai):
+- `google/gemini-2.0-flash-001` — текущая (рекомендуется)
+- `anthropic/claude-3.5-haiku` — дороже, ещё лучше русский
+- `openai/gpt-4o` — дорогой, хорошее качество
+
+После смены: `systemctl daemon-reload && systemctl restart albimusic-vk-bot`
+
+### Как откатить на старую логику (экстренно)
+
+В `main_vk.py` найти строку:
+```python
+elif False and vk_state == States.CHOOSING_LYRICS_VARIANT:  # DISABLED
+```
+Убрать `False and` → старый код снова работает. Перезапустить бота.
+
+---
+
+## 🆕 Новые состояния FSM (добавлены в v2)
+
+| Состояние | Когда используется |
+|-----------|-------------------|
+| `States.REVIEWING_LYRICS` | Пользователь видит готовый текст и выбирает: создать / переписать / выбрать вариант из истории |
+
+**Состояние `CHOOSING_LYRICS_VARIANT` отключено** (заменено на `REVIEWING_LYRICS`). Код оставлен закомментированным в `main_vk.py` для возможного отката.

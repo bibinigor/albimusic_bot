@@ -39,6 +39,33 @@ async def create_bot_ipv4(token):
     bot = Bot(token=token, proxy='socks5://127.0.0.1:9050')
     return bot
 
+
+def _is_forbidden_error(e: Exception) -> bool:
+    """Проверяет, заблокировал ли пользователь бота (Forbidden / Chat not found / User deactivated)."""
+    err_str = str(e).lower()
+    return (
+        'forbidden' in err_str or
+        'bot was blocked' in err_str or
+        'chat not found' in err_str or
+        'user is deactivated' in err_str
+    )
+
+
+def mark_user_blocked(user_id: int):
+    """Помечает пользователя как заблокировавшего бота (is_blocked=TRUE).
+    Монитор будет игнорировать таких пользователей.
+    Флаг сбрасывается автоматически когда пользователь напишет /start.
+    """
+    try:
+        execute_query_sync(
+            "UPDATE users SET is_blocked = TRUE WHERE user_id = %s",
+            (user_id,)
+        )
+        logger.info(f"🚫 Пользователь {user_id} помечен is_blocked=TRUE (заблокировал бота)")
+    except Exception as _e:
+        logger.error(f"❌ Ошибка mark_user_blocked({user_id}): {_e}")
+
+
 async def download_and_cut_audio(url, duration=60):
     """
     Скачивает MP3 файл и обрезает до указанной длительности
@@ -407,22 +434,31 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
                     url="https://t.me/ALBImusic_Chart"
                 )]
             ])
-            await bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "🎧 *Это демо твоей первой песни (45 секунд)*\n\n"
-                    "⚠️ Это только Preview — полная версия длиннее!\n\n"
-                    "🔓 *Разблокируй полную версию за 29₽:*\n"
-                    "• Оба трека без ограничений по времени\n"
-                    "• Кнопки «Послушать» и «Скачать»\n"
-                    "• Минусовка, Кавер, WAV и многое другое\n\n"
-                    "⏰ *Цена 29₽ действует только 24 часа с момента создания первой песни!*\n"
-                    "После — стандартная цена от 99₽.\n\n"
-                    "👇 Нажми кнопку ниже:"
-                ),
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
+            # ИСПРАВЛЕНИЕ: оборачиваем в try/except чтобы Forbidden/Chat not found
+            # не ломал цикл мониторинга — функция должна вернуть True даже если
+            # пользователь заблокировал бота, иначе монитор зациклится.
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "🎧 *Это демо твоей первой песни (45 секунд)*\n\n"
+                        "⚠️ Это только Preview — полная версия длиннее!\n\n"
+                        "🔓 *Разблокируй полную версию за 29₽:*\n"
+                        "• Оба трека без ограничений по времени\n"
+                        "• Кнопки «Послушать» и «Скачать»\n"
+                        "• Минусовка, Кавер, WAV и многое другое\n\n"
+                        "⏰ *Цена 29₽ действует только 24 часа с момента создания первой песни!*\n"
+                        "После — стандартная цена от 99₽.\n\n"
+                        "👇 Нажми кнопку ниже:"
+                    ),
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                logger.info(f"✅ Кнопка разблокировки (29₽) отправлена user {user_id}")
+            except Exception as _send_err:
+                logger.error(f"❌ Ошибка отправки кнопки разблокировки user {user_id}: {_send_err} — помечаем ALREADY_SENT всё равно")
+                if _is_forbidden_error(_send_err):
+                    mark_user_blocked(user_id)
 
             # ✅ Планируем оффер «Новичок» через 3 мин (резерв)
             try:
@@ -655,6 +691,8 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
         logger.error(f"❌ Ошибка отправки демо user {user_id}: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        if _is_forbidden_error(e):
+            mark_user_blocked(user_id)
         return False
 
 async def send_error_notification(user_id, task_id, prompt=None):
@@ -675,6 +713,8 @@ async def send_error_notification(user_id, task_id, prompt=None):
         
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления об ошибке user {user_id}: {e}")
+        if _is_forbidden_error(e):
+            mark_user_blocked(user_id)
         return False
 
 
@@ -711,6 +751,19 @@ async def send_novice_offer(user_id: int):
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки оффера «Новичок» для {user_id}: {e}")
+        # Если пользователь заблокировал бота или чат не найден — помечаем отправленным,
+        # чтобы монитор не спамил ошибками каждые 10 секунд навсегда.
+        err_str = str(e).lower()
+        if 'forbidden' in err_str or 'bot was blocked' in err_str or 'chat not found' in err_str or 'user is deactivated' in err_str:
+            try:
+                execute_query_sync(
+                    "UPDATE users SET novice_offer_sent = TRUE, novice_offer_pending_at = NULL WHERE user_id = %s",
+                    (user_id,)
+                )
+                logger.info(f"🚫 Оффер «Новичок» для {user_id} помечен sent=TRUE (пользователь заблокировал бота)")
+                mark_user_blocked(user_id)
+            except Exception:
+                pass
         return False
 
 
@@ -722,6 +775,7 @@ async def check_and_send_novice_offers():
                WHERE novice_offer_pending_at IS NOT NULL
                AND (novice_offer_sent IS NULL OR novice_offer_sent = FALSE)
                AND NOW() - novice_offer_pending_at >= interval '3 minutes'
+               AND (is_blocked IS NULL OR is_blocked = FALSE)
                LIMIT 10"""
         )
         if pending:
@@ -800,11 +854,13 @@ async def check_long_running_generations():
     try:
         long_running = execute_query_sync(
             """
-            SELECT task_id, user_id, created_at
-            FROM generations
-            WHERE status = 'processing'
-              AND created_at < NOW() - INTERVAL '3 minutes'
-              AND created_at > NOW() - INTERVAL '20 minutes'
+            SELECT g.task_id, g.user_id, g.created_at
+            FROM generations g
+            LEFT JOIN users u ON u.user_id = g.user_id
+            WHERE g.status = 'processing'
+              AND g.created_at < NOW() - INTERVAL '3 minutes'
+              AND g.created_at > NOW() - INTERVAL '20 minutes'
+              AND (u.is_blocked IS NULL OR u.is_blocked = FALSE)
             LIMIT 20
             """
         )
@@ -839,6 +895,8 @@ async def check_long_running_generations():
                 await asyncio.sleep(0.3)
             except Exception as e:
                 logger.error(f"❌ Progress notify failed for user {user_id} task {task_id}: {e}")
+                if _is_forbidden_error(e):
+                    mark_user_blocked(user_id)
 
         # Чистим память: убираем из множества те задачи, которые уже завершились
         if len(_progress_notified) > 200:
@@ -863,7 +921,16 @@ async def monitor_generations():
             # Ищем завершенные задачи в БД (и ошибки)
             # Исключаем задачи с префиксами ALREADY_SENT_, ALREADY_NOTIFIED_ или ERROR_NOTIFIED
             results = execute_query_sync(
-                "SELECT task_id, user_id, prompt, audio_url, status FROM generations WHERE ((status = 'completed' AND audio_url IS NOT NULL) OR (status = 'error' AND audio_url IS NOT NULL)) AND audio_url NOT LIKE 'ALREADY_SENT_%' AND audio_url NOT LIKE 'ALREADY_NOTIFIED_%' AND audio_url != 'ERROR_NOTIFIED' ORDER BY created_at DESC LIMIT 10"
+                """SELECT g.task_id, g.user_id, g.prompt, g.audio_url, g.status
+                   FROM generations g
+                   LEFT JOIN users u ON u.user_id = g.user_id
+                   WHERE ((g.status = 'completed' AND g.audio_url IS NOT NULL)
+                      OR (g.status = 'error' AND g.audio_url IS NOT NULL))
+                   AND g.audio_url NOT LIKE 'ALREADY_SENT_%'
+                   AND g.audio_url NOT LIKE 'ALREADY_NOTIFIED_%'
+                   AND g.audio_url != 'ERROR_NOTIFIED'
+                   AND (u.is_blocked IS NULL OR u.is_blocked = FALSE)
+                   ORDER BY g.created_at DESC LIMIT 10"""
             )
             
             if results:

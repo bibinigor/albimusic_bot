@@ -26,7 +26,8 @@ from celery_tasks import (
     generate_music_task,
     generate_karaoke_task,
     generate_cover_task,
-    generate_wav_task
+    generate_wav_task,
+    generate_lyrics_via_gemini   # ← НОВЫЙ: генерация текста через Gemini 2.0 Flash
 )
 
 # Импортируем модуль администрирования (рассылка)
@@ -595,14 +596,40 @@ class VKBot:
                     """
                 )
                 tariffs_24h = {row[0]: row[1] for row in tariffs_rows} if tariffs_rows else {}
+
+                # Разбивка по платформам (VK / Telegram)
+                platform_total_rows = execute_query_sync(
+                    """
+                    SELECT COALESCE(platform, 'tg') as plat, COUNT(*), COALESCE(SUM(amount), 0)
+                    FROM payments
+                    WHERE status = 'succeeded'
+                    GROUP BY plat
+                    ORDER BY plat
+                    """
+                )
+                platform_total = {row[0]: (row[1], int(row[2])) for row in platform_total_rows} if platform_total_rows else {}
+
+                platform_7d_rows = execute_query_sync(
+                    """
+                    SELECT COALESCE(platform, 'tg') as plat, COUNT(*), COALESCE(SUM(amount), 0)
+                    FROM payments
+                    WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+                    GROUP BY plat
+                    ORDER BY plat
+                    """
+                )
+                platform_7d = {row[0]: (row[1], int(row[2])) for row in platform_7d_rows} if platform_7d_rows else {}
+
             except Exception as e:
                 logger.error(f"❌ Ошибка получения статистики платежей: {e}")
                 count_24h = sum_24h = count_7days = sum_7days = count_total = sum_total = 0
                 tariffs_24h = {}
+                platform_total = {}
+                platform_7d = {}
 
             # Формируем строку разбивки по тарифам
             if tariffs_24h:
-                amount_to_tokens = {50: 1, 250: 10, 500: 25, 1000: 60, 2000: 140}
+                amount_to_tokens = {50: 1, 99: 5, 250: 10, 500: 25, 1000: 60, 2000: 140}
                 tariff_lines = []
                 for amount, cnt in sorted(tariffs_24h.items()):
                     tokens = amount_to_tokens.get(amount)
@@ -613,6 +640,12 @@ class VKBot:
                 tariffs_text = "\n".join(tariff_lines)
             else:
                 tariffs_text = "• нет оплат за 24ч"
+
+            # Формируем строку разбивки по платформам
+            vk_total_cnt, vk_total_sum = platform_total.get('vk', (0, 0))
+            tg_total_cnt, tg_total_sum = platform_total.get('tg', (0, 0))
+            vk_7d_cnt, vk_7d_sum = platform_7d.get('vk', (0, 0))
+            tg_7d_cnt, tg_7d_sum = platform_7d.get('tg', (0, 0))
 
             return f"""📊 Статистика бота:
 
@@ -632,7 +665,11 @@ class VKBot:
     🔍 По тарифам (24ч):
 {tariffs_text}
 📆 За 7 дней: {count_7days} платежей · {sum_7days}₽
+    📱 VK: {vk_7d_cnt} платежей · {vk_7d_sum}₽
+    ✈️ TG: {tg_7d_cnt} платежей · {tg_7d_sum}₽
 📊 Всего: {count_total} платежей · {sum_total}₽
+    📱 VK: {vk_total_cnt} платежей · {vk_total_sum}₽
+    ✈️ TG: {tg_total_cnt} платежей · {tg_total_sum}₽
 
 👥 Приглашенных сегодня: {invited_today}"""
 
@@ -1078,16 +1115,20 @@ class VKBot:
             # ──── ПРИМЕРЫ ПЕСЕН ────
             elif "примеры" in text_lower or text == "🎧 Примеры песен":
                 logger.info(f"🎧 Запрос примеров от пользователя {user_id}")
+                from vk_api.keyboard import VkKeyboard
+                examples_kb = VkKeyboard(inline=True)
+                examples_kb.add_openlink_button(
+                    label="🎵 ПЕРЕЙТИ",
+                    link="https://vk.com/@-235442407-primery-pesen"
+                )
                 self.send_message(
                     user_id=user_id,
                     message=(
-                        "🔐 Это портал для перехода в наше сообщество\n\n"
-                        "«ALBImusic/ Музыка/ Промпты/ Новости/ Обучение»\n\n"
-                        "Там твоё вдохновение! Там твоё секретное оружие — идеи! "
-                        "И там же обучение и новости!\n\n"
-                        "👉 Переходи в сообщество: https://vk.com/club235442407"
+                        "Прямо сейчас перейдите и послушайте песни, которые были созданы нашим ботом. "
+                        "Мы разместили всего несколько, чтобы не отнимать ваше время. "
+                        "Но представление вы уже иметь будете"
                     ),
-                    keyboard=self.get_main_keyboard(user_id)
+                    keyboard=examples_kb
                 )
                 command_handled = True
                 return
@@ -1176,17 +1217,15 @@ class VKBot:
                         self.state_manager.set_state(user_id, States.WAITING_SONG_IDEA)
                     )
                     
-                    prompt_message = """✨ **СЕЙЧАС МЫ ТЕБЕ СОЧИНИМ САМЫЙ ЛУЧШИЙ ТЕКСТ!**
+                    prompt_message = """✨ СЕЙЧАС МЫ ТЕБЕ СОЧИНИМ САМЫЙ ЛУЧШИЙ ТЕКСТ!
 
-Про что и для кого ты хочешь песню? Напиши мне.
+Напиши одним сообщением:
+▪️ О чём / для кого песня
+▪️ В каком жанре или стиле
 
-▪️ для кого / о ком
-▪️ какие интересные моменты упомянуть
-▪️ идея которую хочется передать песней
+📩 Пример: «про кота Василия в стиле панк-рок» или «лирическая баллада о первой любви, женский вокал»
 
-📩 Всё в ОДНОМ сообщении — и я создам текст!
-
-💡 Совет: опиши кратко самое главное (до 200 символов) ✨"""
+Описывай как хочешь — чем подробнее, тем лучше получится текст! ✨"""
                     
                     self.send_message(
                         user_id=user_id,
@@ -1216,102 +1255,135 @@ class VKBot:
                     command_handled = True
                     return
             
-            # Обработка ввода идеи для AI-текста
+            # ── НОВЫЙ ПАЙПЛАЙН: генерация текста через Gemini 2.0 Flash ──────────
             elif vk_state == States.WAITING_SONG_IDEA:
-                command_handled = True  # ВАЖНО: помечаем команду как обработанную
-                
-                # Сохраняем идею для генерации текста
+                command_handled = True
+
+                idea = text  # без ограничения длины — пользователь может описывать подробно
+
+                logger.info(f"📝 [GEMINI] Пользователь {user_id} отправил идею: {idea[:100]}")
+
+                # Сохраняем идею в состоянии (для повторного переписывания)
                 asyncio.get_event_loop().run_until_complete(
-                    self.state_manager.update_data(user_id, song_idea=text)
+                    self.state_manager.update_data(user_id, song_idea=idea)
                 )
-                
-                # Отправляем сообщение о начале генерации
+
+                # Сразу отвечаем пользователю — основной поток свободен
                 self.send_message(
                     user_id=user_id,
-                    message="⏳ Генерирую текст песни, подождите 1-2 минуты...",
+                    message="✍️ Пишу стихи для вашей песни... Обычно это занимает 5-15 секунд.",
                     keyboard=self.get_cancel_keyboard()
                 )
-                
-                print(f"Запуск генерации текста для пользователя {user_id}, идея: {text}")
-                logger.info(f"📝 Запуск генерации текста для пользователя {user_id}, идея: {text}")
-                
-                # Генерируем два варианта текста песни на основе идеи
-                try:
-                    # Ограничиваем длину идеи
-                    idea = text[:500]
-                    
-                    # Генерируем первый вариант текста
-                    lyrics_variant1 = generate_suno_lyrics_sync(idea)
-                    
-                    # Генерируем второй вариант текста с небольшим изменением запроса
-                    lyrics_variant2 = generate_suno_lyrics_sync(idea + " (альтернативный вариант)")
-                    
-                    if lyrics_variant1 and lyrics_variant2:
-                        # Сохраняем сгенерированные тексты
-                        asyncio.get_event_loop().run_until_complete(
-                            self.state_manager.update_data(
-                                user_id, 
-                                lyrics_variant1=lyrics_variant1,
-                                lyrics_variant2=lyrics_variant2
+
+                # Запускаем Gemini в отдельном потоке — не блокируем Long Poll
+                import threading as _th
+
+                def _gemini_lyrics_thread():
+                    try:
+                        logger.info(f"[GEMINI] 🧵 Поток запущен для user {user_id}")
+                        lyrics, style = generate_lyrics_via_gemini(idea, user_id=user_id)
+
+                        if lyrics and style:
+                            # Сохраняем результат в Redis-состоянии
+                            _loop = asyncio.new_event_loop()
+                            try:
+                                _loop.run_until_complete(
+                                    self.state_manager.update_data(
+                                        user_id,
+                                        lyrics=lyrics,
+                                        style=style,
+                                        rewrite_count=0,
+                                        lyrics_history=[]
+                                    )
+                                )
+                                _loop.run_until_complete(
+                                    self.state_manager.set_state(user_id, States.REVIEWING_LYRICS)
+                                )
+                            finally:
+                                _loop.close()
+
+                            # Показываем текст пользователю с кнопками
+                            from vk_keyboards import get_lyrics_review_keyboard
+                            self.send_message(
+                                user_id=user_id,
+                                message=f"✅ Текст готов!\n\n{lyrics}",
+                                keyboard=get_lyrics_review_keyboard(
+                                    rewrite_count=0,
+                                    lyrics_history=[]
+                                )
                             )
-                        )
-                        
-                        # Отправляем первый вариант текста пользователю
+                            logger.info(f"[GEMINI] ✅ Текст отправлен пользователю {user_id}")
+                        else:
+                            # ── Gemini не ответил → автофолбэк на Suno Lyrics API ───────
+                            logger.warning(
+                                f"[GEMINI] ⚠️ Нет ответа от Gemini для user {user_id}. "
+                                f"Автоматически пробуем резервный Suno Lyrics API..."
+                            )
+                            try:
+                                fallback_lyrics = generate_suno_lyrics_sync(idea, user_id=user_id)
+                            except Exception as _fe:
+                                fallback_lyrics = None
+                                logger.error(f"[FALLBACK] ❌ Suno Lyrics также не ответил: {_fe}")
+
+                            if fallback_lyrics:
+                                # Suno вернул текст — показываем его как обычно
+                                fallback_style = idea  # Suno сам разберётся со стилем
+                                _loop = asyncio.new_event_loop()
+                                try:
+                                    _loop.run_until_complete(
+                                        self.state_manager.update_data(
+                                            user_id,
+                                            lyrics=fallback_lyrics,
+                                            style=fallback_style,
+                                            rewrite_count=0,
+                                            lyrics_history=[]
+                                        )
+                                    )
+                                    _loop.run_until_complete(
+                                        self.state_manager.set_state(user_id, States.REVIEWING_LYRICS)
+                                    )
+                                finally:
+                                    _loop.close()
+
+                                from vk_keyboards import get_lyrics_review_keyboard
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=f"✅ Текст готов!\n\n{fallback_lyrics}",
+                                    keyboard=get_lyrics_review_keyboard(
+                                        rewrite_count=0,
+                                        lyrics_history=[]
+                                    )
+                                )
+                                logger.info(f"[FALLBACK] ✅ Suno Lyrics выручил user {user_id}")
+                            else:
+                                # Оба API недоступны — сообщаем пользователю
+                                _loop = asyncio.new_event_loop()
+                                try:
+                                    _loop.run_until_complete(
+                                        self.state_manager.set_state(user_id, States.WAITING_SONG_IDEA)
+                                    )
+                                finally:
+                                    _loop.close()
+
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=(
+                                        "❌ Сервис временно недоступен. Попробуйте через несколько минут.\n\n"
+                                        "Приносим извинения за неудобство!"
+                                    ),
+                                    keyboard=self.get_cancel_keyboard()
+                                )
+
+                    except Exception as _e:
+                        logger.error(f"[GEMINI] ❌ Ошибка в потоке для user {user_id}: {_e}")
                         self.send_message(
                             user_id=user_id,
-                            message=f"✨ Вариант 1:\n\n{lyrics_variant1}"
+                            message="❌ Произошла ошибка. Попробуйте позже.",
+                            keyboard=self.get_main_keyboard(user_id)
                         )
-                        
-                        # Отправляем второй вариант текста пользователю
-                        self.send_message(
-                            user_id=user_id,
-                            message=f"✨ Вариант 2:\n\n{lyrics_variant2}"
-                        )
-                        
-                        # Импортируем клавиатуру для выбора варианта текста
-                        from vk_keyboards import get_lyrics_variants_selection_keyboard
-                        
-                        # Отправляем клавиатуру выбора варианта текста
-                        self.send_message(
-                            user_id=user_id,
-                            message="Выберите вариант текста или напишите свой:",
-                            keyboard=get_lyrics_variants_selection_keyboard()
-                        )
-                        
-                        # Переводим в состояние выбора варианта текста
-                        asyncio.get_event_loop().run_until_complete(
-                            self.state_manager.set_state(user_id, States.CHOOSING_LYRICS_VARIANT)
-                        )
-                    else:
-                        # Если не удалось сгенерировать текст — НЕ сбрасываем состояние,
-                        # оставляем пользователя в WAITING_SONG_IDEA чтобы он мог попробовать снова
-                        asyncio.get_event_loop().run_until_complete(
-                            self.state_manager.set_state(user_id, States.WAITING_SONG_IDEA)
-                        )
-                        self.send_message(
-                            user_id=user_id,
-                            message=(
-                                "❌ Не удалось сгенерировать текст песни.\n\n"
-                                "💡 Попробуйте описать идею подробнее:\n"
-                                "• Напишите 2-3 предложения\n"
-                                "• Укажите настроение (весёлая, грустная, романтичная)\n"
-                                "• Опишите тему или главных героев\n\n"
-                                "Пример: «Весёлая песня про дружбу, как мы с друзьями проводим лето на даче»\n\n"
-                                "✍️ Введите новую идею:"
-                            ),
-                            keyboard=self.get_cancel_keyboard()
-                        )
-                except Exception as e:
-                    logger.error(f"❌ Ошибка генерации текста: {e}")
-                    self.send_message(
-                        user_id=user_id,
-                        message="❌ Произошла ошибка при генерации текста. Попробуйте позже.",
-                        keyboard=self.get_main_keyboard(user_id)
-                    )
-                    self.reset_state(user_id)
-                
-                logger.info(f"✅ Пользователь {user_id} отправил идею для AI-текста")
-                command_handled = True
+                        self.reset_state(user_id)
+
+                _th.Thread(target=_gemini_lyrics_thread, daemon=True).start()
                 return
             # Обработка ввода своего текста
             elif vk_state == States.WAITING_OWN_LYRICS:
@@ -1341,8 +1413,226 @@ class VKBot:
                 command_handled = True
                 return
             
-            # Обработка выбора варианта текста
-            elif vk_state == States.CHOOSING_LYRICS_VARIANT:
+            # ── НОВЫЙ: обработчик просмотра AI-текста (Gemini-пайплайн) ─────────
+            elif vk_state == States.REVIEWING_LYRICS:
+                command_handled = True
+
+                state_data = asyncio.get_event_loop().run_until_complete(
+                    self.state_manager.get_data(user_id)
+                ) or {}
+
+                lyrics = state_data.get('lyrics', '')
+                style  = state_data.get('style', '')
+                song_idea = state_data.get('song_idea', '')
+                rewrite_count = state_data.get('rewrite_count', 0)
+                lyrics_history = state_data.get('lyrics_history', [])
+                FREE_REWRITES = 3
+
+                # ── «Создать песню» ──────────────────────────────────────────────
+                if "🎵 создать песню" in text_lower or text_lower == "создать песню":
+
+                    if not lyrics:
+                        self.send_message(
+                            user_id=user_id,
+                            message="❌ Текст песни не найден. Начните сначала.",
+                            keyboard=self.get_main_keyboard(user_id)
+                        )
+                        self.reset_state(user_id)
+                        return
+
+                    # Проверяем баланс пользователя
+                    balance_rows = execute_query_sync(
+                        'SELECT balance FROM users WHERE user_id = %s', (user_id,)
+                    )
+                    balance = balance_rows[0][0] if balance_rows else 0
+
+                    if balance <= 0:
+                        from vk_keyboards import get_payment_tariffs_keyboard
+                        self.send_message(
+                            user_id=user_id,
+                            message=(
+                                "⚠️ У вас закончились токены!\n\n"
+                                "Для создания песни нужен 1 токен 🪙\n"
+                                "Пополните баланс, чтобы продолжить:"
+                            ),
+                            keyboard=get_payment_tariffs_keyboard()
+                        )
+                        return
+
+                    # Списываем 1 токен
+                    execute_query_sync(
+                        'UPDATE users SET balance = balance - 1 WHERE user_id = %s', (user_id,)
+                    )
+                    self.reset_state(user_id)
+
+                    self.send_message(
+                        user_id=user_id,
+                        message="🎵 Запускаю создание музыки! Это займёт 3-5 минут — я пришлю результат когда будет готово.",
+                        keyboard=self.get_cancel_keyboard()
+                    )
+
+                    import threading as _th2
+                    _th2.Thread(
+                        target=self._launch_song_generation,
+                        args=(user_id, lyrics, style),
+                        daemon=True
+                    ).start()
+
+                    logger.info(f"✅ [REVIEWING_LYRICS] Пользователь {user_id} запустил создание песни")
+                    return
+
+                # ── «Переписать текст» ───────────────────────────────────────────
+                elif "🔄 переписать" in text_lower or "переписать текст" in text_lower:
+
+                    # Проверяем нужен ли токен
+                    if rewrite_count >= FREE_REWRITES:
+                        balance_rows = execute_query_sync(
+                            'SELECT balance FROM users WHERE user_id = %s', (user_id,)
+                        )
+                        balance = balance_rows[0][0] if balance_rows else 0
+                        if balance <= 0:
+                            from vk_keyboards import get_payment_tariffs_keyboard
+                            self.send_message(
+                                user_id=user_id,
+                                message=(
+                                    "⚠️ Бесплатные переписывания закончились!\n\n"
+                                    "Следующее переписывание стоит 1 токен 🪙, но токены закончились.\n"
+                                    "Пополните баланс или нажмите «Создать песню» с текущим текстом:"
+                                ),
+                                keyboard=get_payment_tariffs_keyboard()
+                            )
+                            return
+                        # Списываем токен за платное переписывание
+                        execute_query_sync(
+                            'UPDATE users SET balance = balance - 1 WHERE user_id = %s', (user_id,)
+                        )
+
+                    # Сохраняем текущий текст в историю (не более 3 вариантов)
+                    if lyrics:
+                        lyrics_history = list(lyrics_history)
+                        if len(lyrics_history) >= 3:
+                            lyrics_history.pop(0)  # убираем самый старый если больше 3
+                        lyrics_history.append(lyrics)
+
+                    new_rewrite_count = rewrite_count + 1
+
+                    self.send_message(
+                        user_id=user_id,
+                        message="✍️ Пишу новый вариант текста...",
+                        keyboard=self.get_cancel_keyboard()
+                    )
+
+                    import threading as _th3
+
+                    def _rewrite_thread():
+                        try:
+                            new_lyrics, new_style = generate_lyrics_via_gemini(song_idea, user_id=user_id)
+                            if new_lyrics and new_style:
+                                _loop2 = asyncio.new_event_loop()
+                                try:
+                                    _loop2.run_until_complete(
+                                        self.state_manager.update_data(
+                                            user_id,
+                                            lyrics=new_lyrics,
+                                            style=new_style,
+                                            rewrite_count=new_rewrite_count,
+                                            lyrics_history=lyrics_history
+                                        )
+                                    )
+                                    _loop2.run_until_complete(
+                                        self.state_manager.set_state(user_id, States.REVIEWING_LYRICS)
+                                    )
+                                finally:
+                                    _loop2.close()
+
+                                from vk_keyboards import get_lyrics_review_keyboard
+                                self.send_message(
+                                    user_id=user_id,
+                                    message=f"✅ Новый вариант готов!\n\n{new_lyrics}",
+                                    keyboard=get_lyrics_review_keyboard(
+                                        rewrite_count=new_rewrite_count,
+                                        lyrics_history=lyrics_history
+                                    )
+                                )
+                            else:
+                                from vk_keyboards import get_lyrics_review_keyboard
+                                self.send_message(
+                                    user_id=user_id,
+                                    message="❌ Не удалось переписать текст. Используйте текущий или попробуйте ещё раз.",
+                                    keyboard=get_lyrics_review_keyboard(
+                                        rewrite_count=rewrite_count,
+                                        lyrics_history=lyrics_history
+                                    )
+                                )
+                        except Exception as _e2:
+                            logger.error(f"[REWRITE] ❌ Ошибка переписывания для user {user_id}: {_e2}")
+                            self.send_message(
+                                user_id=user_id,
+                                message="❌ Произошла ошибка. Попробуйте позже.",
+                                keyboard=self.get_main_keyboard(user_id)
+                            )
+                            self.reset_state(user_id)
+
+                    _th3.Thread(target=_rewrite_thread, daemon=True).start()
+                    return
+
+                # ── «📋 Вариант N» — выбор из истории ───────────────────────────
+                elif text_lower.startswith("📋 вариант") or text_lower.startswith("вариант"):
+                    import re as _re
+                    _num = _re.search(r'\d+', text)
+                    if _num:
+                        variant_idx = int(_num.group()) - 1
+                        if 0 <= variant_idx < len(lyrics_history):
+                            selected_lyrics = lyrics_history[variant_idx]
+                            # Делаем выбранный вариант текущим, убираем его из истории
+                            new_history = [l for i, l in enumerate(lyrics_history) if i != variant_idx]
+                            if lyrics:  # кладём текущий текст обратно в историю
+                                new_history.append(lyrics)
+                                if len(new_history) > 3:
+                                    new_history.pop(0)
+
+                            asyncio.get_event_loop().run_until_complete(
+                                self.state_manager.update_data(
+                                    user_id,
+                                    lyrics=selected_lyrics,
+                                    lyrics_history=new_history
+                                )
+                            )
+
+                            from vk_keyboards import get_lyrics_review_keyboard
+                            self.send_message(
+                                user_id=user_id,
+                                message=f"📋 Вариант {variant_idx + 1} выбран:\n\n{selected_lyrics}",
+                                keyboard=get_lyrics_review_keyboard(
+                                    rewrite_count=rewrite_count,
+                                    lyrics_history=new_history
+                                )
+                            )
+                        else:
+                            self.send_message(
+                                user_id=user_id,
+                                message="❌ Вариант не найден. Нажмите «Создать песню» или «Переписать текст».",
+                                keyboard=state_data.get('__kb__')
+                            )
+                    return
+
+                else:
+                    # Не распознанная кнопка в состоянии REVIEWING_LYRICS — показываем подсказку
+                    from vk_keyboards import get_lyrics_review_keyboard
+                    self.send_message(
+                        user_id=user_id,
+                        message="Нажмите «🎵 Создать песню» или «🔄 Переписать текст».",
+                        keyboard=get_lyrics_review_keyboard(
+                            rewrite_count=rewrite_count,
+                            lyrics_history=lyrics_history
+                        )
+                    )
+                    return
+
+            # ── СТАРЫЙ КОД (CHOOSING_LYRICS_VARIANT) — ОТКЛЮЧЁН ─────────────────
+            # Заменён обработчиком REVIEWING_LYRICS выше (Gemini-пайплайн).
+            # Для восстановления: смените False на True в условии ниже.
+            elif False and vk_state == States.CHOOSING_LYRICS_VARIANT:  # DISABLED
                 if "выбрать вариант 1" in text_lower or text == "Выбрать вариант 1" or "выбрать 1 вариант" in text_lower:
                     # Пользователь выбрал первый вариант текста
                     # Получаем данные состояния
@@ -2624,10 +2914,11 @@ class VKBot:
             # Стиль = жанр без принудительного пола вокала
             style = translated_genre
 
-            # Включаем customMode для длинных текстов
-            use_custom_mode = len(lyrics) > 500
+            # customMode = True если есть любой текст (Gemini всегда даёт готовый текст)
+            # ИСПРАВЛЕНО: убрана проверка len > 500, которая ломала короткие тексты
+            use_custom_mode = bool(lyrics)
             if use_custom_mode:
-                logger.info(f"ℹ️ Автоматически включен customMode из-за длины текста ({len(lyrics)} символов)")
+                logger.info(f"ℹ️ customMode=True, длина текста: {len(lyrics)} символов")
 
             logger.info(f"🎵 Запуск генерации песни для пользователя {user_id}")
             logger.info(f"🎵 Текст: {lyrics[:100]}...")

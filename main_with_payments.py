@@ -1017,21 +1017,85 @@ async def yookassa_webhook(request: Request):
                                 "🎉 *Оплата прошла! Отправляю полные версии...*",
                                 parse_mode="Markdown"
                             )
+
+                            # ── Получаем URL треков (из demo_data или fallback из generations) ──
+                            urls_to_send = []
                             if dd and dd[0]:
                                 full_url_1, full_url_2 = dd[0]
-                                urls = [u for u in [full_url_1, full_url_2] if u]
-                                for idx, url in enumerate(urls, 1):
+                                urls_to_send = [u for u in [full_url_1, full_url_2] if u]
+                            if not urls_to_send:
+                                # Fallback: ищем URL в таблице generations
+                                logging.warning(f"⚠️ demo_data пуст для task={tid}, ищем в generations")
+                                gen_fallback = execute_query_sync(
+                                    "SELECT audio_url FROM generations WHERE task_id = %s",
+                                    (tid,)
+                                )
+                                if gen_fallback and gen_fallback[0][0]:
+                                    raw_url = gen_fallback[0][0]
+                                    if raw_url.startswith('ALREADY_SENT_'):
+                                        raw_url = raw_url[len('ALREADY_SENT_'):]
+                                    if raw_url and not raw_url.startswith('ERROR'):
+                                        urls_to_send = [raw_url]
+
+                            sent_count = 0
+                            for idx, url in enumerate(urls_to_send, 1):
+                                try:
+                                    await bot.send_audio(
+                                        chat_id=int(uid),
+                                        audio=url,
+                                        caption=f"🎼 *Версия {idx}* — полная версия",
+                                        title=f"AI Music - Full Version {idx}",
+                                        performer="ALBI Music",
+                                        parse_mode="Markdown"
+                                    )
+                                    sent_count += 1
+                                    logging.info(f"✅ Полная версия {idx} отправлена user={uid} (unlock_first)")
+                                except Exception as e:
+                                    logging.error(f"❌ send_audio версия {idx} не удалась (unlock_first user={uid}): {e} — пробуем URL текстом")
+                                    # Fallback: отправить URL текстом
                                     try:
-                                        await bot.send_audio(
+                                        await bot.send_message(
                                             chat_id=int(uid),
-                                            audio=url,
-                                            caption=f"🎼 *Версия {idx}* — полная версия",
-                                            title=f"AI Music - Full Version {idx}",
-                                            performer="ALBI Music",
+                                            text=f"🎼 *Версия {idx}* — полная версия:\n{url}",
                                             parse_mode="Markdown"
                                         )
-                                    except Exception as e:
-                                        logging.error(f"❌ Ошибка отправки полной версии {idx} после TG unlock: {e}")
+                                        sent_count += 1
+                                        logging.info(f"✅ Полная версия {idx} отправлена текстом user={uid}")
+                                    except Exception as e2:
+                                        logging.error(f"❌ Даже URL текстом не удался (версия {idx}, user={uid}): {e2}")
+
+                            # Если вообще ничего не отправилось — уведомляем админа
+                            if sent_count == 0 and urls_to_send:
+                                logging.error(f"🔴 КРИТИЧНО: unlock_first — ни один трек не доставлен! user={uid}, task={tid}, urls={urls_to_send}")
+                                try:
+                                    await bot.send_message(
+                                        ADMIN_ID,
+                                        f"🔴 *UNLOCK FAIL* — пользователь оплатил, треки не доставлены!\n"
+                                        f"user_id: `{uid}`\ntask_id: `{tid}`\n"
+                                        f"URLs: {urls_to_send}\n"
+                                        f"⚠️ Требуется ручная отправка!",
+                                        parse_mode="Markdown"
+                                    )
+                                except Exception:
+                                    pass
+                                await bot.send_message(
+                                    int(uid),
+                                    "⚠️ Произошла техническая ошибка при отправке треков.\n"
+                                    "Деньги зачислены, треки будут отправлены вручную в течение нескольких часов.\n"
+                                    "Приносим извинения за неудобства!",
+                                )
+                            elif not urls_to_send:
+                                logging.error(f"🔴 КРИТИЧНО: unlock_first — нет URL треков! user={uid}, task={tid}, dd={dd}")
+                                try:
+                                    await bot.send_message(
+                                        ADMIN_ID,
+                                        f"🔴 *UNLOCK FAIL (no URLs)* — пользователь оплатил, URL треков не найдены!\n"
+                                        f"user_id: `{uid}`\ntask_id: `{tid}`\n"
+                                        f"⚠️ Требуется ручная отправка!",
+                                        parse_mode="Markdown"
+                                    )
+                                except Exception:
+                                    pass
 
                             # Кнопки — всё как при обычной оплаченной генерации
                             full_keyboard = InlineKeyboardMarkup(row_width=2)
@@ -1065,9 +1129,31 @@ async def yookassa_webhook(request: Request):
                                 parse_mode="Markdown"
                             )
                         except Exception as e:
-                            logging.error(f"❌ Ошибка отправки разблокированных треков TG unlock_first: {e}")
+                            logging.error(f"❌ Ошибка отправки разблокированных треков TG unlock_first (user={uid}, task={tid}): {e}", exc_info=True)
+                            # Аварийное уведомление пользователю
+                            try:
+                                await bot.send_message(
+                                    int(uid),
+                                    "⚠️ Произошла техническая ошибка при отправке треков.\n"
+                                    "Деньги зачислены, треки будут отправлены вручную в течение нескольких часов.\n"
+                                    "Приносим извинения за неудобства!"
+                                )
+                                await bot.send_message(
+                                    ADMIN_ID,
+                                    f"🔴 *UNLOCK FAIL (exception)* user={uid}, task={tid}\n"
+                                    f"Ошибка: {e}\n⚠️ Требуется ручная отправка!",
+                                    parse_mode="Markdown"
+                                )
+                            except Exception:
+                                pass
 
-                    asyncio.create_task(_send_unlocked_first_gen())
+                    # Оборачиваем task чтобы необработанные исключения не поглощались молча
+                    def _on_unlock_task_done(fut):
+                        if fut.exception():
+                            logging.error(f"🔴 asyncio task _send_unlocked_first_gen завершилась с исключением: {fut.exception()}", exc_info=fut.exception())
+
+                    _unlock_task = asyncio.create_task(_send_unlocked_first_gen())
+                    _unlock_task.add_done_callback(_on_unlock_task_done)
 
                 return JSONResponse({"status": "ok"})
 
@@ -1202,6 +1288,16 @@ async def cmd_start(message: types.Message, state: FSMContext):
             except:
                 pass
     await add_user(user.id, user.username, user.first_name, invited_by)
+
+    # Если пользователь ранее блокировал бота и теперь написал снова — снимаем пометку
+    try:
+        execute_query_sync(
+            "UPDATE users SET is_blocked = FALSE WHERE user_id = %s AND is_blocked = TRUE",
+            (user.id,)
+        )
+    except Exception:
+        pass
+
     if invited_by and invited_by != user.id:
         try:
             # Используем db_utils для реферальной системы
@@ -2057,7 +2153,7 @@ async def process_create_music(callback_query: types.CallbackQuery):
     await bot.send_message(callback_query.from_user.id, "🎵 *Опишите стиль музыки:*\n\n• Жанр и направление\n• Музыкальные инструменты\n• Ритм и темп\n• Настроение и атмосфера", parse_mode="Markdown")
     await MusicStates.waiting_for_music_style.set()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
+@dp.callback_query_handler(lambda c: c.data.startswith('pay_') and c.data != 'pay_29_novice' and not c.data.startswith('pay_unlock_29_'))
 async def process_payment(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
     user_id = callback_query.from_user.id
@@ -2423,14 +2519,30 @@ async def albi_broadcast_got_text(message: types.Message, state: FSMContext):
         InlineKeyboardButton("✅ Отправить всем", callback_data="albi_bc_confirm"),
         InlineKeyboardButton("❌ Отмена",          callback_data="albi_bc_cancel"),
     )
-    await message.answer(
-        f"👀 *Предпросмотр:*\n\n{message.text}\n\n"
-        f"─────────────────\n"
-        f"Будет отправлено: *{total} пользователям*\n\n"
-        f"Подтвердить?",
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
+
+    # Пробуем с Markdown, если не получается — показываем как обычный текст
+    try:
+        await message.answer(
+            f"👀 *Предпросмотр (Markdown):*\n\n{message.text}\n\n"
+            f"─────────────────\n"
+            f"Будет отправлено: *{total} пользователям*\n\n"
+            f"Подтвердить?",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+    except Exception:
+        # Markdown сломан (например, _ в @username) — показываем как plain text
+        await message.answer(
+            f"👀 Предпросмотр (plain text — Markdown отключён из-за спецсимволов):\n\n"
+            f"{message.text}\n\n"
+            f"─────────────────\n"
+            f"⚠️ В тексте есть символы _ * ` которые ломают Markdown. "
+            f"Рассылка будет отправлена как обычный текст (без форматирования).\n\n"
+            f"Будет отправлено: {total} пользователям\n\n"
+            f"Подтвердить?",
+            reply_markup=kb,
+        )
+
     await BroadcastStates.waiting_confirm.set()
 
 
@@ -2454,31 +2566,56 @@ async def albi_broadcast_confirm_cb(callback_query: types.CallbackQuery, state: 
     from postgres_db import fetch_query
     import asyncio as _asyncio
     rows = await fetch_query("SELECT user_id FROM users")
+    total = len(rows)
 
-    await bot.send_message(
+    start_msg = await bot.send_message(
         callback_query.from_user.id,
-        f"🚀 *Рассылка заряжена!*\n\n"
-        f"📨 Начинаю отправку *{len(rows)}* пользователям...\n"
-        f"⏳ Подожди — пришлю итог когда закончу.",
+        f"🚀 *Рассылка запущена!*\n\n"
+        f"📨 Начинаю отправку *{total}* пользователям...\n"
+        f"⏳ Буду сообщать о прогрессе каждые 25 человек.",
         parse_mode="Markdown",
     )
 
     sent = 0
     errors = 0
-    for row in rows:
+    PROGRESS_STEP = 100  # сообщать прогресс каждые N пользователей
+
+    for i, row in enumerate(rows, start=1):
         uid = row["user_id"]
         try:
-            await bot.send_message(uid, text, parse_mode="Markdown")
+            # Пробуем с Markdown, если не парсится — отправляем plain text
+            try:
+                await bot.send_message(uid, text, parse_mode="Markdown")
+            except Exception as md_err:
+                if "CantParseEntities" in str(type(md_err).__name__) or "parse" in str(md_err).lower():
+                    await bot.send_message(uid, text)  # plain text fallback
+                else:
+                    raise
             sent += 1
         except Exception:
             errors += 1
-        await _asyncio.sleep(1)
+        await _asyncio.sleep(0.3)  # ~3 сообщения/сек — безопасно, без риска бана
+
+        # Прогресс каждые 25 пользователей
+        if i % PROGRESS_STEP == 0 and i < total:
+            pct = int(i / total * 100)
+            try:
+                await bot.send_message(
+                    callback_query.from_user.id,
+                    f"📊 *Прогресс рассылки:* {pct}%\n"
+                    f"✅ Отправлено: {sent} / {total}\n"
+                    f"❌ Ошибок: {errors}",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
     await bot.send_message(
         callback_query.from_user.id,
         f"✅ *Рассылка завершена!*\n\n"
-        f"📤 Отправлено: *{sent}*\n"
-        f"❌ Ошибок (заблокировали бот): *{errors}*",
+        f"📤 Успешно отправлено: *{sent}* из *{total}*\n"
+        f"❌ Не доставлено (заблокировали бот): *{errors}*\n\n"
+        f"📋 Рассылка полностью завершена.",
         parse_mode="Markdown",
     )
 

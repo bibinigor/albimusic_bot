@@ -646,9 +646,10 @@ def generate_suno_music_sync(prompt, is_song=False, custom_mode=False, user_id=N
 
                             # Возвращаем кортеж: (audio_url, suno_task_id, suno_audio_id)
                             return (audio_url, task_id, suno_audio_id)
-                    elif status == 'ERROR':
+                    elif status in ('ERROR', 'GENERATE_AUDIO_FAILED', 'GENERATE_FAILED', 'FAILED'):
                         error_msg = status_result.get('data', {}).get('response', {}).get('error', 'Unknown error')
-                        logger.error(f"[{request_id}] ❌ SUNO GENERATION ERROR:")
+                        logger.error(f"[{request_id}] ❌ SUNO GENERATION FAILED:")
+                        logger.error(f"[{request_id}]    • Status: {status}")
                         logger.error(f"[{request_id}]    • Error: {error_msg}")
                         logger.error(f"[{request_id}]    • Full response: {json.dumps(status_result, ensure_ascii=False)}")
                         return None
@@ -818,6 +819,149 @@ def generate_suno_lyrics_sync(prompt, user_id=None):
     except Exception as e:
         logger.error(f"[{request_id}] ❌ Exception: {type(e).__name__} - {str(e)}")
         return None
+
+# ── Флаг: последний раз OpenRouter вернул ошибку оплаты ─────────────────────
+# Значение None = неизвестно, True = ошибка оплаты, False = всё OK
+_openrouter_payment_error = False
+
+def generate_lyrics_via_gemini(user_request, user_id=None):
+    """
+    Генерирует текст песни и стиль для Suno через Gemini 2.0 Flash (OpenRouter API).
+
+    Принимает свободное описание пользователя (идея + жанр одним сообщением).
+    Возвращает tuple (lyrics: str, style: str) или (None, None) при ошибке.
+
+    lyrics — готовый текст с тегами [Verse 1], [Chorus] и т.д.
+    style  — профессиональный английский промпт стиля для Suno API
+    """
+    import re
+    import uuid
+
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"╔═══════════════════════════════════════════════════════════╗")
+    logger.info(f"║  GEMINI LYRICS | ID: {request_id} | User: {user_id}       ")
+    logger.info(f"╚═══════════════════════════════════════════════════════════╝")
+    logger.info(f"[{request_id}] 📝 INPUT: {user_request[:200]}")
+
+    if not config.OPENROUTER_API_KEY:
+        logger.error(f"[{request_id}] ❌ OPENROUTER_API_KEY не задан в config.py!")
+        return None, None
+
+    # ── Системный промпт ────────────────────────────────────────────────────
+    SYSTEM_PROMPT = (
+        "Ты — выдающийся профессиональный поэт-песенник и хитмейкер. "
+        "Пишешь тексты песен на русском языке по описанию пользователя.\n\n"
+        "ФОРМАТ ОТВЕТА (строго обязателен, не отклоняйся):\n"
+        "Первая строка: STYLE: <одна строка на английском — профессиональный промпт стиля для музыкальной нейросети Suno>\n"
+        "Вторая строка: три дефиса: ---\n"
+        "Далее: полный текст песни с тегами.\n\n"
+        "ПРИМЕР:\n"
+        "STYLE: punk rock, aggressive electric guitars, fast tempo, male vocals with rough edge, raw energy, rebellious mood\n"
+        "---\n"
+        "[Verse 1]\n"
+        "текст первого куплета...\n\n"
+        "ТРЕБОВАНИЯ К STYLE (первая строка):\n"
+        "- Только на английском языке\n"
+        "- Включи: жанр, характер звука, темп (fast/mid/slow tempo), тип вокала, ключевые инструменты, настроение\n"
+        "- Максимум 200 символов\n\n"
+        "ТРЕБОВАНИЯ К ТЕКСТУ ПЕСНИ:\n"
+        "1. Структура строго: [Verse 1] → [Chorus] → [Verse 2] → [Chorus] → [Bridge] → [Chorus] → [Outro]\n"
+        "2. Теги ТОЛЬКО на английском в квадратных скобках: [Verse 1], [Verse 2], [Chorus], [Bridge], [Outro]\n"
+        "3. Текст ТОЛЬКО на русском языке\n"
+        "4. Используй ТОЛЬКО реальные существующие слова русского языка — никаких неологизмов и искажений\n"
+        "5. Категорически запрещены банальные глагольные рифмы (любить/купить, страдать/убегать)\n"
+        "6. Применяй перекрёстные, охватные или составные рифмы\n"
+        "7. Строго выдерживай одинаковое количество слогов в строках одного раздела\n"
+        "8. Никаких пояснений, комментариев, нумерации строк, эмодзи, звёздочек — только теги и текст\n"
+        "9. Выдай ТОЛЬКО текст в указанном формате. Ничего больше."
+    )
+
+    headers = {
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://albi-music.ru",
+        "X-Title": "ALBI Music Bot"
+    }
+
+    payload = {
+        "model": config.OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_request}
+        ],
+        "temperature": 0.85,
+        "max_tokens": 2000
+    }
+
+    try:
+        logger.info(f"[{request_id}] 📤 Запрос к OpenRouter ({config.OPENROUTER_MODEL})")
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+
+        logger.info(f"[{request_id}] 📥 Статус ответа: {response.status_code}")
+
+        if response.status_code != 200:
+            global _openrouter_payment_error
+            # ── Детектируем ошибку оплаты (нет денег на счёте) ─────────────
+            if response.status_code in (402, 429):
+                _openrouter_payment_error = True
+                logger.critical(
+                    f"[{request_id}] 💳 OPENROUTER BALANCE EMPTY или RATE LIMIT! "
+                    f"HTTP {response.status_code}. Пополните баланс на openrouter.ai. "
+                    f"Бот автоматически переключился на резервный Suno Lyrics API."
+                )
+            else:
+                _openrouter_payment_error = False
+                logger.error(f"[{request_id}] ❌ HTTP {response.status_code}: {response.text[:300]}")
+            return None, None
+
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        if not content:
+            logger.error(f"[{request_id}] ❌ Пустой ответ от модели")
+            return None, None
+
+        logger.info(f"[{request_id}] ✅ Получен ответ ({len(content)} символов)")
+
+        # ── Парсим STYLE и LYRICS ────────────────────────────────────────────
+        style = "pop music, catchy melody, modern production"  # fallback
+
+        style_match = re.search(r'^STYLE:\s*(.+)$', content, re.MULTILINE)
+        if style_match:
+            style = style_match.group(1).strip()[:200]
+            logger.info(f"[{request_id}] 🎸 Style извлечён: {style}")
+        else:
+            logger.warning(f"[{request_id}] ⚠️ STYLE строка не найдена, используем fallback")
+
+        # Убираем строку STYLE: и разделитель ---
+        lyrics = re.sub(r'^STYLE:.*\n', '', content, flags=re.MULTILINE)
+        lyrics = re.sub(r'^-{2,}\n', '', lyrics, flags=re.MULTILINE)
+        lyrics = lyrics.strip()
+
+        # Очищаем от markdown мусора (**, *, __, ##, нумерация строк)
+        lyrics = re.sub(r'\*\*|\*|__|_|#{1,6}\s?', '', lyrics)
+        lyrics = re.sub(r'^\d+[.)]\s', '', lyrics, flags=re.MULTILINE)
+        lyrics = lyrics.strip()
+
+        if not lyrics:
+            logger.error(f"[{request_id}] ❌ Текст песни не извлечён из ответа")
+            return None, None
+
+        logger.info(f"[{request_id}] ✅ Текст готов: {len(lyrics)} символов")
+        return lyrics, style
+
+    except requests.Timeout:
+        logger.error(f"[{request_id}] ⏰ Таймаут запроса к OpenRouter (60 сек)")
+        return None, None
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ Исключение: {type(e).__name__} — {str(e)}")
+        return None, None
+
 
 def save_generation_task_sync(user_id, task_id, prompt, status, audio_url=None, suno_task_id=None, suno_audio_id=None):
     """Синхронное сохранение задачи в БД с Suno API идентификаторами"""
