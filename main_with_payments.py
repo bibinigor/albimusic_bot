@@ -325,8 +325,8 @@ def get_admin_stats():
         # Импортируем синхронные функции БД
         from db_utils import execute_query_sync
         
-        # 1. Всего пользователей (из таблицы users)
-        users_result = execute_query_sync("SELECT COUNT(*) as total FROM users")
+        # 1. Всего пользователей (живых — без заблокировавших бота)
+        users_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE is_blocked IS NOT TRUE")
         total_users = users_result[0][0] if users_result and users_result[0] else 0
 
         # 2. Новых сегодня (по дате создания, сутки)
@@ -343,9 +343,9 @@ def get_admin_stats():
         new_30days_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'")
         new_30days = new_30days_result[0][0] if new_30days_result and new_30days_result[0] else 0
 
-        # 5. Генераций за последние 24 часа (по времени создания)
+        # 5. Генераций сегодня по МСК (00:00 — 23:59 московского времени)
         generations_24h_result = execute_query_sync(
-            "SELECT COUNT(*) as total FROM generations WHERE created_at >= NOW() - INTERVAL '24 hours'"
+            "SELECT COUNT(*) as total FROM generations WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'"
         )
         generations_24h = generations_24h_result[0][0] if generations_24h_result and generations_24h_result[0] else 0
 
@@ -382,11 +382,11 @@ def get_admin_stats():
             """)
             
             paid_24h_result = execute_query_sync(f"""
-                SELECT COUNT(*) as total 
-                FROM generations 
+                SELECT COUNT(*) as total
+                FROM generations
                 WHERE user_id IN ({paid_users_str})
                 AND status = 'completed'
-                AND created_at >= NOW() - INTERVAL '24 hours'
+                AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'
             """)
             
             paid_total_result = execute_query_sync(f"""
@@ -408,15 +408,15 @@ def get_admin_stats():
         invited_today_result = execute_query_sync("SELECT COUNT(*) as total FROM users WHERE created_at >= CURRENT_DATE AND invited_by IS NOT NULL")
         invited_today = invited_today_result[0][0] if invited_today_result and invited_today_result[0] else 0
 
-        # 11. Воронка: новые пользователи за 24 часа и те, кто дошёл до меню
-        started_24h_result = execute_query_sync("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours'")
+        # 11. Воронка: новые пользователи сегодня по МСК и те, кто дошёл до меню
+        started_24h_result = execute_query_sync("SELECT COUNT(*) FROM users WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'")
         started_24h = started_24h_result[0][0] if started_24h_result and started_24h_result[0] else 0
 
-        menu_24h_result = execute_query_sync("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours' AND first_menu_action_at IS NOT NULL")
+        menu_24h_result = execute_query_sync("SELECT COUNT(*) FROM users WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow' AND first_menu_action_at IS NOT NULL")
         menu_24h = menu_24h_result[0][0] if menu_24h_result and menu_24h_result[0] else 0
 
         # 12. Суммы платежей
-        sum_24h_result = execute_query_sync("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'")
+        sum_24h_result = execute_query_sync("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'")
         sum_24h = int(sum_24h_result[0][0]) if sum_24h_result and sum_24h_result[0] else 0
 
         sum_7days_result = execute_query_sync("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'")
@@ -426,7 +426,7 @@ def get_admin_stats():
         sum_total = int(sum_total_result[0][0]) if sum_total_result and sum_total_result[0] else 0
 
         # 13. Количество платежей (отдельно от генераций — по таблице payments)
-        count_24h_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'")
+        count_24h_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'")
         count_24h = count_24h_result[0][0] if count_24h_result and count_24h_result[0] else 0
 
         count_7days_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'")
@@ -435,11 +435,11 @@ def get_admin_stats():
         count_total_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded'")
         count_total = count_total_result[0][0] if count_total_result and count_total_result[0] else 0
 
-        # 14. Разбивка оплат за 24 часа по тарифам (amount)
+        # 14. Разбивка оплат сегодня по МСК по тарифам (amount)
         tariffs_24h_rows = execute_query_sync("""
             SELECT amount, COUNT(*)
             FROM payments
-            WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '24 hours'
+            WHERE status = 'succeeded' AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'
             GROUP BY amount
             ORDER BY amount
         """)
@@ -465,6 +465,35 @@ def get_admin_stats():
         """)
         platform_7d = {row[0]: (row[1], int(row[2])) for row in platform_7d_rows} if platform_7d_rows else {}
 
+        # 17. Источники переходов (referral_source) — за всё время
+        sources_rows = execute_query_sync("""
+            SELECT COALESCE(referral_source, 'direct') as src, COUNT(*)
+            FROM users
+            GROUP BY src
+            ORDER BY COUNT(*) DESC
+        """)
+        sources = {row[0]: row[1] for row in sources_rows} if sources_rows else {}
+
+        # 18. Источники переходов — за 7 дней
+        sources_7d_rows = execute_query_sync("""
+            SELECT COALESCE(referral_source, 'direct') as src, COUNT(*)
+            FROM users
+            WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'
+            GROUP BY src
+            ORDER BY COUNT(*) DESC
+        """)
+        sources_7d = {row[0]: row[1] for row in sources_7d_rows} if sources_7d_rows else {}
+
+        # 19. Источники переходов — за сегодня
+        sources_today_rows = execute_query_sync("""
+            SELECT COALESCE(referral_source, 'direct') as src, COUNT(*)
+            FROM users
+            WHERE created_at >= CURRENT_DATE
+            GROUP BY src
+            ORDER BY COUNT(*) DESC
+        """)
+        sources_today = {row[0]: row[1] for row in sources_today_rows} if sources_today_rows else {}
+
         return {
             'total_users': total_users,
             'new_today': new_today,
@@ -489,6 +518,9 @@ def get_admin_stats():
             'tariffs_24h': tariffs_24h,
             'platform_total': platform_total,
             'platform_7d': platform_7d,
+            'sources': sources,
+            'sources_7d': sources_7d,
+            'sources_today': sources_today,
         }
     except Exception as e:
         logging.error(f"❌ Ошибка получения статистики: {e}")
@@ -514,6 +546,9 @@ def get_admin_stats():
             'count_total': 0,
             'platform_total': {},
             'platform_7d': {},
+            'sources': {},
+            'sources_7d': {},
+            'sources_today': {},
         }
 def track_first_menu_action(user_id):
     """Фиксирует первое нажатие кнопки главного меню (записывается только один раз)"""
@@ -1010,12 +1045,17 @@ async def yookassa_webhook(request: Request):
 
                 else:
                     # ── TG нотификация (асинхронная) ─────────────────────────────
-                    async def _send_unlocked_first_gen(uid=user_id, tid=task_id_unlock, dd=demo_data):
+                    async def _send_unlocked_first_gen(uid=user_id, tid=task_id_unlock, dd=demo_data, _token=BOT_TOKEN):
+                        # ИСПРАВЛЕНИЕ (20.04.2026): создаём локальный Bot-экземпляр внутри задачи,
+                        # чтобы избежать ошибки "Timeout context manager should be used inside a task"
+                        # ИСПРАВЛЕНИЕ (21.04.2026): BOT_TOKEN захватывается через default-аргумент _token=BOT_TOKEN,
+                        # иначе внутри asyncio-задачи имя 'BOT_TOKEN' недоступно (NameError).
+                        from aiogram import Bot as _Bot
+                        _local_bot = _Bot(token=_token, proxy='socks5://127.0.0.1:9050', parse_mode='HTML')
                         try:
-                            await bot.send_message(
+                            await _local_bot.send_message(
                                 int(uid),
-                                "🎉 *Оплата прошла! Отправляю полные версии...*",
-                                parse_mode="Markdown"
+                                "🎉 <b>Оплата прошла! Отправляю полные версии...</b>",
                             )
 
                             # ── Получаем URL треков (из demo_data или fallback из generations) ──
@@ -1040,13 +1080,12 @@ async def yookassa_webhook(request: Request):
                             sent_count = 0
                             for idx, url in enumerate(urls_to_send, 1):
                                 try:
-                                    await bot.send_audio(
+                                    await _local_bot.send_audio(
                                         chat_id=int(uid),
                                         audio=url,
-                                        caption=f"🎼 *Версия {idx}* — полная версия",
+                                        caption=f"🎼 <b>Версия {idx}</b> — полная версия",
                                         title=f"AI Music - Full Version {idx}",
                                         performer="ALBI Music",
-                                        parse_mode="Markdown"
                                     )
                                     sent_count += 1
                                     logging.info(f"✅ Полная версия {idx} отправлена user={uid} (unlock_first)")
@@ -1054,10 +1093,9 @@ async def yookassa_webhook(request: Request):
                                     logging.error(f"❌ send_audio версия {idx} не удалась (unlock_first user={uid}): {e} — пробуем URL текстом")
                                     # Fallback: отправить URL текстом
                                     try:
-                                        await bot.send_message(
+                                        await _local_bot.send_message(
                                             chat_id=int(uid),
-                                            text=f"🎼 *Версия {idx}* — полная версия:\n{url}",
-                                            parse_mode="Markdown"
+                                            text=f"🎼 <b>Версия {idx}</b> — полная версия:\n{url}",
                                         )
                                         sent_count += 1
                                         logging.info(f"✅ Полная версия {idx} отправлена текстом user={uid}")
@@ -1068,7 +1106,7 @@ async def yookassa_webhook(request: Request):
                             if sent_count == 0 and urls_to_send:
                                 logging.error(f"🔴 КРИТИЧНО: unlock_first — ни один трек не доставлен! user={uid}, task={tid}, urls={urls_to_send}")
                                 try:
-                                    await bot.send_message(
+                                    await _local_bot.send_message(
                                         ADMIN_ID,
                                         f"🔴 *UNLOCK FAIL* — пользователь оплатил, треки не доставлены!\n"
                                         f"user_id: `{uid}`\ntask_id: `{tid}`\n"
@@ -1078,7 +1116,7 @@ async def yookassa_webhook(request: Request):
                                     )
                                 except Exception:
                                     pass
-                                await bot.send_message(
+                                await _local_bot.send_message(
                                     int(uid),
                                     "⚠️ Произошла техническая ошибка при отправке треков.\n"
                                     "Деньги зачислены, треки будут отправлены вручную в течение нескольких часов.\n"
@@ -1087,7 +1125,7 @@ async def yookassa_webhook(request: Request):
                             elif not urls_to_send:
                                 logging.error(f"🔴 КРИТИЧНО: unlock_first — нет URL треков! user={uid}, task={tid}, dd={dd}")
                                 try:
-                                    await bot.send_message(
+                                    await _local_bot.send_message(
                                         ADMIN_ID,
                                         f"🔴 *UNLOCK FAIL (no URLs)* — пользователь оплатил, URL треков не найдены!\n"
                                         f"user_id: `{uid}`\ntask_id: `{tid}`\n"
@@ -1114,31 +1152,30 @@ async def yookassa_webhook(request: Request):
                                 InlineKeyboardButton("🔗 Поделиться с другом", switch_inline_query=tid),
                                 InlineKeyboardButton("🔔 Перейти в канал", url="https://t.me/ALBImusic_Chart")
                             )
-                            await bot.send_message(
+                            await _local_bot.send_message(
                                 int(uid),
-                                "✅ *Полные версии разблокированы!*\n\n"
-                                "💎 *Что можно сделать с этой песней:*\n\n"
-                                "🎧 **Послушать** — полная версия без ограничений\n"
-                                "🎤 **Минусовка** — версия без вокала для исполнения\n"
-                                "🎸 **Кавер** — перепой в другом стиле/жанре\n"
-                                "🎵 **В WAV** — конвертируй в WAV формат для профи\n"
-                                "📢 **Отправить в канал** — опубликуй в официальном канале\n"
-                                "🔗 **Поделиться** — отправь другу прямо сейчас\n\n"
+                                "✅ <b>Полные версии разблокированы!</b>\n\n"
+                                "💎 <b>Что можно сделать с этой песней:</b>\n\n"
+                                "🎧 <b>Послушать</b> — полная версия без ограничений\n"
+                                "🎤 <b>Минусовка</b> — версия без вокала для исполнения\n"
+                                "🎸 <b>Кавер</b> — перепой в другом стиле/жанре\n"
+                                "🎵 <b>В WAV</b> — конвертируй в WAV формат для профи\n"
+                                "📢 <b>Отправить в канал</b> — опубликуй в официальном канале\n"
+                                "🔗 <b>Поделиться</b> — отправь другу прямо сейчас\n\n"
                                 "🚀 Хочешь создать ещё? Нажми «Создать песню» в меню!",
                                 reply_markup=full_keyboard,
-                                parse_mode="Markdown"
                             )
                         except Exception as e:
                             logging.error(f"❌ Ошибка отправки разблокированных треков TG unlock_first (user={uid}, task={tid}): {e}", exc_info=True)
                             # Аварийное уведомление пользователю
                             try:
-                                await bot.send_message(
+                                await _local_bot.send_message(
                                     int(uid),
                                     "⚠️ Произошла техническая ошибка при отправке треков.\n"
                                     "Деньги зачислены, треки будут отправлены вручную в течение нескольких часов.\n"
                                     "Приносим извинения за неудобства!"
                                 )
-                                await bot.send_message(
+                                await _local_bot.send_message(
                                     ADMIN_ID,
                                     f"🔴 *UNLOCK FAIL (exception)* user={uid}, task={tid}\n"
                                     f"Ошибка: {e}\n⚠️ Требуется ручная отправка!",
@@ -1146,6 +1183,8 @@ async def yookassa_webhook(request: Request):
                                 )
                             except Exception:
                                 pass
+                        finally:
+                            await _local_bot.close()
 
                     # Оборачиваем task чтобы необработанные исключения не поглощались молча
                     def _on_unlock_task_done(fut):
@@ -1174,14 +1213,18 @@ async def yookassa_webhook(request: Request):
                     )
                     logging.info(f"✅ novice_gen: +1 токен пользователю {user_id}, сумма={_nov_amount}₽")
                     # Уведомляем
-                    async def _notify_novice_gen(uid=user_id):
+                    async def _notify_novice_gen(uid=user_id, _token=BOT_TOKEN):
+                        # ИСПРАВЛЕНИЕ (21.04.2026): используем локальный Bot вместо глобального
+                        # чтобы избежать "Timeout context manager should be used inside a task"
+                        from aiogram import Bot as _Bot
+                        _nb = _Bot(token=_token, proxy='socks5://127.0.0.1:9050', parse_mode='HTML')
                         try:
                             inline_kb = InlineKeyboardMarkup(row_width=2)
                             inline_kb.add(
                                 InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
                                 InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
                             )
-                            await bot.send_message(
+                            await _nb.send_message(
                                 int(uid),
                                 "🎁 *Оплата прошла! +1 генерация (2 трека)*\n\n"
                                 "✅ Начислен 1 токен — создавай свою следующую песню!\n\n"
@@ -1191,6 +1234,8 @@ async def yookassa_webhook(request: Request):
                             )
                         except Exception as _ne:
                             logging.error(f"❌ Ошибка уведомления novice_gen {uid}: {_ne}")
+                        finally:
+                            await _nb.close()
                     asyncio.create_task(_notify_novice_gen())
                     return JSONResponse({"status": "ok"})
 
@@ -1221,11 +1266,15 @@ async def yookassa_webhook(request: Request):
 
                 # Отправляем уведомление через asyncio.create_task чтобы избежать
                 # "Timeout context manager should be used inside a task"
-                async def _notify_payment(uid=user_id, tok=tokens, pkg=package_type):
+                async def _notify_payment(uid=user_id, tok=tokens, pkg=package_type, _token=BOT_TOKEN):
+                    # ИСПРАВЛЕНИЕ (21.04.2026): используем локальный Bot вместо глобального
+                    # чтобы избежать "Timeout context manager should be used inside a task"
+                    from aiogram import Bot as _Bot
+                    _pb = _Bot(token=_token, proxy='socks5://127.0.0.1:9050', parse_mode='HTML')
                     try:
                         if pkg == 'novice':
                             # Пакет «Новичок» — специальное сообщение
-                            await bot.send_message(
+                            await _pb.send_message(
                                 int(uid),
                                 "🎉 Пакет «Новичок» активирован. Тебе начислено 5 токенов. Твори прямо сейчас!\n\n"
                                 "И обязательно посмотри примеры треков в нашем канале — <a href='https://t.me/ALBImusic_Chart/146'>ЗДЕСЬ</a>",
@@ -1233,14 +1282,14 @@ async def yookassa_webhook(request: Request):
                             )
                         elif pkg == 'weekend':
                             # Пакет «Выходные» — специальное сообщение
-                            await bot.send_message(
+                            await _pb.send_message(
                                 int(uid),
                                 "🎉 Тебе начислено 5 токенов. Пакет «Выходные» активирован. Срочно пиши песни про друзей!",
                                 parse_mode="HTML"
                             )
                         elif pkg == 'newcomer_offer':
                             # Новичковый оффер — разовое предложение для новичков
-                            await bot.send_message(
+                            await _pb.send_message(
                                 int(uid),
                                 "🎁 <b>Стартовый пакет активирован!</b>\n\n"
                                 "Тебе начислено 5 токенов — это 10 треков. Твори прямо сейчас!\n\n"
@@ -1254,7 +1303,7 @@ async def yookassa_webhook(request: Request):
                                 InlineKeyboardButton("🎵 Создать песню", callback_data="create_song_inline"),
                                 InlineKeyboardButton("🎶 Создать музыку", callback_data="create_music_inline")
                             )
-                            await bot.send_message(
+                            await _pb.send_message(
                                 int(uid),
                                 f"🎉 Спасибо! Оплата поступила!\n\n"
                                 f"💰 Начислено: *{tok} токенов*\n\n"
@@ -1265,6 +1314,8 @@ async def yookassa_webhook(request: Request):
                             )
                     except Exception as e:
                         logging.error(f"❌ Не удалось отправить уведомление пользователю {uid}: {e}")
+                    finally:
+                        await _pb.close()
                 asyncio.create_task(_notify_payment())
                 return JSONResponse({"status": "ok"})
         return JSONResponse({"status": "ignored"})
@@ -1280,6 +1331,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
     user = message.from_user
     invited_by = None
+    ref_source = None  # источник перехода (dzen, tiktok, vk, ...)
     if len(message.text.split()) > 1:
         ref_param = message.text.split()[1]
         if ref_param.startswith('ref_'):
@@ -1287,6 +1339,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
                 invited_by = int(ref_param.split('_')[1])
             except:
                 pass
+        elif ref_param in ('dzen', 'tiktok', 'vk', 'inst', 'youtube'):
+            # Deep link с меткой источника: ?start=dzen / ?start=tiktok и т.д.
+            ref_source = ref_param
     await add_user(user.id, user.username, user.first_name, invited_by)
 
     # Если пользователь ранее блокировал бота и теперь написал снова — снимаем пометку
@@ -1297,6 +1352,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
     except Exception:
         pass
+
+    # Сохраняем источник перехода только для новых пользователей (referral_source IS NULL)
+    if ref_source:
+        try:
+            execute_query_sync(
+                "UPDATE users SET referral_source = %s WHERE user_id = %s AND referral_source IS NULL",
+                (ref_source, user.id)
+            )
+            logging.info(f"📍 Источник '{ref_source}' сохранён для пользователя {user.id}")
+        except Exception as _e:
+            logging.warning(f"⚠️ Ошибка сохранения referral_source для {user.id}: {_e}")
 
     if invited_by and invited_by != user.id:
         try:
@@ -2416,10 +2482,20 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
         return
     stats = get_admin_stats()
 
-    # Воронка: процент дошедших до меню среди НОВЫХ за 24 часа
+    # Воронка: процент дошедших до меню среди НОВЫХ сегодня МСК
     started = stats.get("started_24h", 0)
     menu = stats.get("menu_24h", 0)
     menu_pct = round(menu * 100.0 / started, 1) if started > 0 else 0
+
+    # Юнит-экономика: прибыль сегодня
+    COST_PER_GEN = 4.8  # 12 токенов Suno × 0.40₽
+    revenue_today = stats.get("sum_24h", 0)
+    gens_today = stats.get("generations_24h", 0)
+    cost_today = round(gens_today * COST_PER_GEN, 2)
+    profit_today = round(revenue_today - cost_today, 2)
+    profit_sign = "+" if profit_today >= 0 else ""
+    profit_emoji = "🟢" if profit_today >= 0 else "🔴"
+    profit_line = f"{profit_emoji} Прибыль сегодня = {profit_sign}{profit_today}₽  (выручка {revenue_today}₽ − себес. {cost_today}₽)"
 
     # Разбивка оплат за 24 часа по тарифам
     tariffs_24h = stats.get("tariffs_24h", {}) or {}
@@ -2451,22 +2527,55 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
     vk_7d_cnt, vk_7d_sum = platform_7d.get('vk', (0, 0))
     tg_7d_cnt, tg_7d_sum = platform_7d.get('tg', (0, 0))
 
+    # Источники переходов
+    _source_labels = {
+        'dzen': '📰 Дзен',
+        'tiktok': '🎵 ТикТок',
+        'vk': '📱 ВКонтакте',
+        'inst': '📸 Instagram',
+        'youtube': '▶️ YouTube',
+        'direct': '🔗 Прямой',
+    }
+    sources_today = stats.get("sources_today", {}) or {}
+    sources_7d = stats.get("sources_7d", {}) or {}
+    sources_all = stats.get("sources", {}) or {}
+
+    def _fmt_sources(d: dict) -> str:
+        if not d:
+            return "  нет данных"
+        lines = []
+        for src, cnt in d.items():
+            label = _source_labels.get(src, f'❓ {src}')
+            lines.append(f"  {label}: {cnt}")
+        return "\n".join(lines)
+
+    sources_today_text = _fmt_sources(sources_today)
+    sources_7d_text = _fmt_sources(sources_7d)
+    sources_all_text = _fmt_sources(sources_all)
+
     text = f"""📊 *Статистика бота:*
 
 👥 Всего пользователей: {stats.get("total_users", 0)} (+{stats.get("new_today", 0)})
 📈 Новых за 7 дней: {stats.get("new_7days", 0)}
 📅 Новых за 30 дней: {stats.get("new_30days", 0)}
 
-📊 *Воронка (НОВЫЕ за 24ч):*
+📊 *Воронка (НОВЫЕ сегодня МСК):*
 ▶️ Нажали /start (новые): {started}
 🖱 Дошли до меню (из новых): {menu} ({menu_pct}%)
 
-🎵 Генераций за 24ч: {stats.get("generations_24h", 0)} шт
+🗺 *Источники (сегодня):*
+{sources_today_text}
+🗺 *Источники (7 дней):*
+{sources_7d_text}
+🗺 *Источники (всё время):*
+{sources_all_text}
+
+🎵 Генераций сегодня МСК: {stats.get("generations_24h", 0)} шт
 ✅ Общий успех (все время): {stats.get("success_rate", 0)}%
 
 💳 *Оплаты:*
-⏰ За 24ч: {stats.get("count_24h", 0)} платежей · {stats.get("sum_24h", 0)}₽
-    🔍 По тарифам (24ч):
+🌅 Сегодня МСК: {stats.get("count_24h", 0)} платежей · {stats.get("sum_24h", 0)}₽
+    🔍 По тарифам (сегодня):
 {tariffs_24h_text}
 📆 За 7 дней: {stats.get("count_7days", 0)} платежей · {stats.get("sum_7days", 0)}₽
     📱 VK: {vk_7d_cnt} платежей · {vk_7d_sum}₽
@@ -2475,10 +2584,86 @@ async def process_admin_stats(callback_query: types.CallbackQuery):
     📱 VK: {vk_total_cnt} платежей · {vk_total_sum}₽
     ✈️ TG: {tg_total_cnt} платежей · {tg_total_sum}₽
 
-👥 Приглашенных сегодня: {stats.get("invited_today", 0)}"""
+👥 Приглашенных сегодня: {stats.get("invited_today", 0)}
 
-    refresh_btn = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats"))
+{profit_line}"""
+
+    refresh_btn = InlineKeyboardMarkup(row_width=2)
+    refresh_btn.add(
+        InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats"),
+        InlineKeyboardButton("📊 ЮНИТ 7 дней", callback_data="admin_unit7"),
+    )
     await bot.send_message(callback_query.from_user.id, text, parse_mode="Markdown", reply_markup=refresh_btn)
+
+
+@dp.callback_query_handler(lambda c: c.data == 'admin_unit7')
+async def process_admin_unit7(callback_query: types.CallbackQuery):
+    """Юнит-экономика за последние 7 дней по дням (МСК)"""
+    await bot.answer_callback_query(callback_query.id)
+    if not is_admin(callback_query.from_user.id):
+        return
+
+    from db_utils import execute_query_sync
+    COST_PER_GEN = 4.8  # 12 токенов Suno × 0.40₽
+
+    rows = execute_query_sync("""
+        SELECT
+            (day AT TIME ZONE 'Europe/Moscow')::date AS date_msk,
+            COALESCE(g.gens, 0)                      AS gens,
+            COALESCE(p.revenue, 0)                   AS revenue
+        FROM generate_series(
+            date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow' - interval '6 days') AT TIME ZONE 'Europe/Moscow',
+            date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow',
+            interval '1 day'
+        ) AS day
+        LEFT JOIN (
+            SELECT date_trunc('day', created_at AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow' AS d,
+                   COUNT(*) AS gens
+            FROM generations
+            GROUP BY d
+        ) g ON g.d = day
+        LEFT JOIN (
+            SELECT date_trunc('day', created_at AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow' AS d,
+                   COALESCE(SUM(amount), 0) AS revenue
+            FROM payments WHERE status = 'succeeded'
+            GROUP BY d
+        ) p ON p.d = day
+        ORDER BY date_msk
+    """)
+
+    if not rows:
+        await bot.send_message(callback_query.from_user.id, "❌ Нет данных за 7 дней")
+        return
+
+    total_gens = total_rev = 0
+    lines = ["📊 *Юнит-экономика — 7 дней (МСК)*\n"]
+    for date_msk, gens, revenue in rows:
+        cost = gens * COST_PER_GEN
+        profit = revenue - cost
+        sign = "+" if profit >= 0 else ""
+        emoji = "🟢" if profit >= 0 else "🔴"
+        lines.append(
+            f"{emoji} *{date_msk.strftime('%d.%m')}* | ген: {gens} | выр: {int(revenue)}₽ | прибыль: *{sign}{profit:.1f}₽*"
+        )
+        total_gens += gens
+        total_rev += revenue
+
+    total_cost = total_gens * COST_PER_GEN
+    total_profit = total_rev - total_cost
+    total_sign = "+" if total_profit >= 0 else ""
+    total_emoji = "🟢" if total_profit >= 0 else "🔴"
+    lines.append(f"\n─────────────────────")
+    lines.append(
+        f"{total_emoji} *ИТОГО* | ген: {total_gens} | выр: {int(total_rev)}₽ | прибыль: *{total_sign}{total_profit:.1f}₽*"
+    )
+
+    back_btn = InlineKeyboardMarkup().add(InlineKeyboardButton("◀️ Назад к статистике", callback_data="admin_stats"))
+    await bot.send_message(
+        callback_query.from_user.id,
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=back_btn
+    )
 
 # ─── Рассылка (Админ) ────────────────────────────────────────
 
