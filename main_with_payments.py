@@ -293,12 +293,15 @@ def add_generation(user_id, task_id, prompt, audio_url, is_free=False, custom_mo
         logging.error(f"❌ Ошибка добавления генерации {user_id}: {e}")
 
 def add_payment(user_id, amount, status, payment_id):
-    """ИСПРАВЛЕНО: Используем PostgreSQL вместо SQLite"""
+    """ИСПРАВЛЕНО 23.04.2026: WHERE NOT EXISTS — защита от дублей при повторных вебхуках ЮKassa."""
     try:
         from db_utils import execute_query_sync
+        # INSERT только если payment_id ещё не существует в таблице
         execute_query_sync(
-            'INSERT INTO payments (user_id, amount, status, payment_id, platform) VALUES (%s, %s, %s, %s, %s)',
-            (user_id, amount, status, payment_id, 'tg')
+            'INSERT INTO payments (user_id, amount, status, payment_id, platform) '
+            'SELECT %s, %s, %s, %s, %s WHERE NOT EXISTS '
+            '(SELECT 1 FROM payments WHERE payment_id = %s)',
+            (user_id, amount, status, payment_id, 'tg', payment_id)
         )
         logging.info(f"✅ Платеж {payment_id} добавлен для пользователя {user_id}")
     except Exception as e:
@@ -416,50 +419,86 @@ def get_admin_stats():
         menu_24h = menu_24h_result[0][0] if menu_24h_result and menu_24h_result[0] else 0
 
         # 12. Суммы платежей
-        sum_24h_result = execute_query_sync("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'")
+        # ИСПРАВЛЕНО 23.04.2026: используем DISTINCT ON (payment_id) чтобы исключить дубли
+        # вебхука из статистики (ЮKassa ретраит вебхуки — старые записи задублированы).
+        sum_24h_result = execute_query_sync("""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM (SELECT DISTINCT ON (payment_id) payment_id, amount
+                  FROM payments
+                  WHERE status = 'succeeded'
+                    AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'
+                  ORDER BY payment_id, created_at) _s
+        """)
         sum_24h = int(sum_24h_result[0][0]) if sum_24h_result and sum_24h_result[0] else 0
 
-        sum_7days_result = execute_query_sync("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'")
+        sum_7days_result = execute_query_sync("""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM (SELECT DISTINCT ON (payment_id) payment_id, amount
+                  FROM payments
+                  WHERE status = 'succeeded'
+                    AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+                  ORDER BY payment_id, created_at) _s
+        """)
         sum_7days = int(sum_7days_result[0][0]) if sum_7days_result and sum_7days_result[0] else 0
 
-        sum_total_result = execute_query_sync("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'succeeded'")
+        sum_total_result = execute_query_sync("""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM (SELECT DISTINCT ON (payment_id) payment_id, amount
+                  FROM payments
+                  WHERE status = 'succeeded'
+                  ORDER BY payment_id, created_at) _s
+        """)
         sum_total = int(sum_total_result[0][0]) if sum_total_result and sum_total_result[0] else 0
 
-        # 13. Количество платежей (отдельно от генераций — по таблице payments)
-        count_24h_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'")
+        # 13. Количество платежей — считаем DISTINCT payment_id
+        count_24h_result = execute_query_sync(
+            "SELECT COUNT(DISTINCT payment_id) FROM payments WHERE status = 'succeeded' "
+            "AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'"
+        )
         count_24h = count_24h_result[0][0] if count_24h_result and count_24h_result[0] else 0
 
-        count_7days_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'")
+        count_7days_result = execute_query_sync(
+            "SELECT COUNT(DISTINCT payment_id) FROM payments WHERE status = 'succeeded' "
+            "AND created_at >= CURRENT_DATE - INTERVAL '7 days'"
+        )
         count_7days = count_7days_result[0][0] if count_7days_result and count_7days_result[0] else 0
 
-        count_total_result = execute_query_sync("SELECT COUNT(*) FROM payments WHERE status = 'succeeded'")
+        count_total_result = execute_query_sync(
+            "SELECT COUNT(DISTINCT payment_id) FROM payments WHERE status = 'succeeded'"
+        )
         count_total = count_total_result[0][0] if count_total_result and count_total_result[0] else 0
 
-        # 14. Разбивка оплат сегодня по МСК по тарифам (amount)
+        # 14. Разбивка оплат сегодня по МСК по тарифам — DISTINCT payment_id
         tariffs_24h_rows = execute_query_sync("""
             SELECT amount, COUNT(*)
-            FROM payments
-            WHERE status = 'succeeded' AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'
+            FROM (SELECT DISTINCT ON (payment_id) payment_id, amount
+                  FROM payments
+                  WHERE status = 'succeeded'
+                    AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'
+                  ORDER BY payment_id, created_at) _s
             GROUP BY amount
             ORDER BY amount
         """)
         tariffs_24h = {row[0]: row[1] for row in tariffs_24h_rows} if tariffs_24h_rows else {}
 
-        # 15. Разбивка платежей по платформам (VK / TG) — всего
+        # 15. Разбивка по платформам — всего (DISTINCT payment_id)
         platform_total_rows = execute_query_sync("""
-            SELECT COALESCE(platform, 'tg') as plat, COUNT(*), COALESCE(SUM(amount), 0)
-            FROM payments
-            WHERE status = 'succeeded'
+            SELECT plat, COUNT(*), COALESCE(SUM(amount), 0)
+            FROM (SELECT DISTINCT ON (payment_id) payment_id, amount, COALESCE(platform, 'tg') AS plat
+                  FROM payments WHERE status = 'succeeded'
+                  ORDER BY payment_id, created_at) _s
             GROUP BY plat
             ORDER BY plat
         """)
         platform_total = {row[0]: (row[1], int(row[2])) for row in platform_total_rows} if platform_total_rows else {}
 
-        # 16. Разбивка платежей по платформам (VK / TG) — за 7 дней
+        # 16. Разбивка по платформам — за 7 дней (DISTINCT payment_id)
         platform_7d_rows = execute_query_sync("""
-            SELECT COALESCE(platform, 'tg') as plat, COUNT(*), COALESCE(SUM(amount), 0)
-            FROM payments
-            WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+            SELECT plat, COUNT(*), COALESCE(SUM(amount), 0)
+            FROM (SELECT DISTINCT ON (payment_id) payment_id, amount, COALESCE(platform, 'tg') AS plat
+                  FROM payments
+                  WHERE status = 'succeeded' AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+                  ORDER BY payment_id, created_at) _s
             GROUP BY plat
             ORDER BY plat
         """)
@@ -817,7 +856,7 @@ async def send_no_tokens_message(user_id, context_text="У вас недоста
         remaining_no = 10 - gens_bought_no
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton(
-            f"🎁 Создать ещё песню — 29₽ (⏰ {int(hours_left_no)}ч, осталось {remaining_no} из 10)",
+            f"🎁 Создать ещё песню — 39₽ (⏰ {int(hours_left_no)}ч, осталось {remaining_no} из 10)",
             callback_data="pay_29_novice"
         ))
         markup.add(InlineKeyboardButton("💳 Все тарифы", callback_data="go_to_balance"))
@@ -825,7 +864,7 @@ async def send_no_tokens_message(user_id, context_text="У вас недоста
             user_id,
             f"❌ *{context_text}*\n\n"
             f"🎁 *У тебя активно специальное окно новичка!*\n\n"
-            f"⏰ Ещё *{int(hours_left_no)} ч* действует цена *29₽ за 1 генерацию* (осталось {remaining_no} из 10).\n\n"
+            f"⏰ Ещё *{int(hours_left_no)} ч* действует цена *39₽ за 1 генерацию* (осталось {remaining_no} из 10).\n\n"
             f"👇 Нажми кнопку ниже:",
             reply_markup=markup,
             parse_mode="Markdown"
@@ -907,7 +946,7 @@ def get_balance_keyboard(user_id):
         remaining = 10 - gens_bought
         markup.add(
             InlineKeyboardButton(
-                f"🎁 НОВИЧОК: ещё песня — 29₽ ⏰ ({int(hours_left)}ч, осталось {remaining} из 10)",
+                f"🎁 НОВИЧОК: ещё песня — 39₽ ⏰ ({int(hours_left)}ч, осталось {remaining} из 10)",
                 callback_data="pay_29_novice"
             )
         )
@@ -986,6 +1025,18 @@ async def yookassa_webhook(request: Request):
         if notification.get('event') == 'payment.succeeded':
             payment = notification.get('object', {})
             payment_id = payment.get('id')
+
+            # ─── Идемпотентность: пропускаем повторные вебхуки ЮKassa ───────────
+            # ЮKassa ретраит вебхук пока не получит 200. Без этой проверки каждый
+            # ретрай создавал бы новую запись в payments и начислял токены повторно.
+            if payment_id:
+                _dup = execute_query_sync(
+                    "SELECT id FROM payments WHERE payment_id = %s LIMIT 1", (payment_id,)
+                )
+                if _dup:
+                    logging.info(f"⚡ Дубль вебхука пропущен (payment_id уже обработан): {payment_id}")
+                    return JSONResponse({"status": "ok"})
+            # ─────────────────────────────────────────────────────────────────────
 
             # Обработка обычных платежей за генерации
             user_id = payment.get('metadata', {}).get('user_id')
@@ -1199,11 +1250,11 @@ async def yookassa_webhook(request: Request):
             amount = float(payment.get('amount', {}).get('value', 0))
             if user_id and amount:
                 # ============================================================
-                # Специальная обработка: платёж novice_gen (29₽ за 1 токен)
+                # Специальная обработка: платёж novice_gen (39₽ за 1 токен)
                 # ============================================================
                 payment_type_novice = payment.get('metadata', {}).get('payment_type', '')
                 if payment_type_novice == 'novice_gen' and user_id:
-                    _nov_amount = float(payment.get('amount', {}).get('value', 29.0))
+                    _nov_amount = float(payment.get('amount', {}).get('value', 39.0))
                     add_balance(user_id, 1)
                     add_payment(user_id, _nov_amount, 'succeeded', payment.get('id'))
                     # Инкрементируем счётчик новичковых генераций
@@ -1251,8 +1302,8 @@ async def yookassa_webhook(request: Request):
                     2000.00: 140,
                     3990.00: 140,
                     4000.00: 140,
-                    # Совместимость со старыми ценами
-                    29.00: 1,   # новичковая разблокировка
+                    # Новичковая разблокировка / покупка одиночной генерации
+                    39.00: 1,   # новичковая разблокировка / novice_gen (актуальная цена)
                     50.00: 1,
                     100.00: 1,
                 }
@@ -1513,7 +1564,7 @@ async def handle_balance(message: types.Message, state: FSMContext):
         remaining_bal = 10 - gens_bought_bal
         novice_block = (
             f"\n🎁 *СПЕЦИАЛЬНАЯ ЦЕНА ДЛЯ НОВИЧКА (⏰ ещё {int(hours_left_bal)} ч):*\n"
-            f"🔥 *29₽ за 1 генерацию* — доступно ещё {remaining_bal} из 10!\n"
+            f"🔥 *39₽ за 1 генерацию* — доступно ещё {remaining_bal} из 10!\n"
             f"После истечения 24ч — стандартные цены от 99₽.\n"
         )
     else:
@@ -2625,7 +2676,12 @@ async def process_admin_unit7(callback_query: types.CallbackQuery):
         LEFT JOIN (
             SELECT date_trunc('day', created_at AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow' AS d,
                    COALESCE(SUM(amount), 0) AS revenue
-            FROM payments WHERE status = 'succeeded'
+            FROM (
+                SELECT DISTINCT ON (payment_id) payment_id, amount, created_at
+                FROM payments
+                WHERE status = 'succeeded'
+                ORDER BY payment_id, created_at
+            ) _uniq
             GROUP BY d
         ) p ON p.d = day
         ORDER BY date_msk
@@ -3103,12 +3159,12 @@ async def process_play_track(callback_query: types.CallbackQuery):
         user_has_paid = paid_check and paid_check[0][0] > 0
 
         if not user_has_paid:
-            # Проверяем новичковое окно — если активно, цена 29₽, иначе 50₽
+            # Проверяем новичковое окно — если активно, цена 39₽, иначе 50₽
             _is_novice_play, _hours_play, _gens_play = get_novice_status(user_id)
             if _is_novice_play:
-                _unlock_price_label = f"29₽ ⏰ (ещё {int(_hours_play)}ч!)"
+                _unlock_price_label = f"39₽ ⏰ (ещё {int(_hours_play)}ч!)"
                 _unlock_cb = f"pay_unlock_29_{task_id}"
-                _price_note = f"\n\n⏰ *Цена 29₽ действует только {int(_hours_play)}ч — потом стандартная цена*"
+                _price_note = f"\n\n⏰ *Цена 39₽ действует только {int(_hours_play)}ч — потом стандартная цена*"
             else:
                 _unlock_price_label = "50₽"
                 _unlock_cb = f"pay_unlock_50_{task_id}"
@@ -3994,7 +4050,7 @@ async def process_unlock_full_versions(callback_query: types.CallbackQuery, stat
 
 @dp.callback_query_handler(lambda c: c.data.startswith('pay_unlock_29_'), state='*')
 async def process_pay_unlock_first_gen_29(callback_query: types.CallbackQuery, state: FSMContext):
-    """Создаёт платёж ЮKassa 29₽ для разблокировки первой (демо) генерации (новичковое окно 24ч)"""
+    """Создаёт платёж ЮKassa 39₽ для разблокировки первой (демо) генерации (новичковое окно 24ч)"""
     await bot.answer_callback_query(callback_query.id)
     user_id = callback_query.from_user.id
     task_id = callback_query.data.replace('pay_unlock_29_', '')
@@ -4008,9 +4064,24 @@ async def process_pay_unlock_first_gen_29(callback_query: types.CallbackQuery, s
         await callback_query.answer("✅ Этот трек уже разблокирован!", show_alert=True)
         return
 
+    # Защита от двойного нажатия: если уже есть pending-платёж для этого task_id за последние 10 мин
+    recent_pending_ul = execute_query_sync(
+        "SELECT id FROM payments WHERE user_id = %s AND status = 'pending' "
+        "AND metadata->>'task_id' = %s "
+        "AND created_at > NOW() - INTERVAL '10 minutes'",
+        (user_id, task_id)
+    )
+    if recent_pending_ul:
+        await callback_query.answer(
+            "⏳ Платёж уже создан! Проверьте предыдущее сообщение с кнопкой оплаты.",
+            show_alert=True
+        )
+        logging.info(f"⚠️ pay_unlock_29: дубль-нажатие от user={user_id} task={task_id}, блокируем")
+        return
+
     # Проверяем: окно ещё активно?
     is_novice_active_ul, hours_left_ul, _ = get_novice_status(user_id)
-    unlock_price = 29 if is_novice_active_ul else 50
+    unlock_price = 39 if is_novice_active_ul else 50
     timer_text = f"\n\n⏰ Специальная цена {unlock_price}₽ ещё {int(hours_left_ul)} ч! Потом — от 99₽." if is_novice_active_ul else ""
 
     payment = await create_yookassa_payment(
@@ -4065,6 +4136,21 @@ async def process_pay_unlock_first_gen(callback_query: types.CallbackQuery, stat
         await callback_query.answer("✅ Этот трек уже разблокирован!", show_alert=True)
         return
 
+    # Защита от двойного нажатия: если уже есть pending-платёж для этого task_id за последние 10 мин
+    recent_pending_50 = execute_query_sync(
+        "SELECT id FROM payments WHERE user_id = %s AND status = 'pending' "
+        "AND metadata->>'task_id' = %s "
+        "AND created_at > NOW() - INTERVAL '10 minutes'",
+        (user_id, task_id)
+    )
+    if recent_pending_50:
+        await callback_query.answer(
+            "⏳ Платёж уже создан! Проверьте предыдущее сообщение с кнопкой оплаты.",
+            show_alert=True
+        )
+        logging.info(f"⚠️ pay_unlock_50: дубль-нажатие от user={user_id} task={task_id}, блокируем")
+        return
+
     # Создаём платёж ЮKassa на 50₽
     payment = await create_yookassa_payment(
         user_id,
@@ -4103,11 +4189,11 @@ async def process_pay_unlock_first_gen(callback_query: types.CallbackQuery, stat
 
 
 # ============================================================
-# ОБРАБОТЧИК: новичковая генерация (1 токен за 29₽, 24 часового окно, лимит 10 шт)
+# ОБРАБОТЧИК: новичковая генерация (1 токен за 39₽, 24 часового окно, лимит 10 шт)
 # ============================================================
 @dp.callback_query_handler(lambda c: c.data == 'pay_29_novice', state='*')
 async def process_pay_29_novice(callback_query: types.CallbackQuery, state: FSMContext):
-    """Создаёт платёж YooKassa 29₽ → 1 токен (новичковое 24-часовое окно, до 10 покупок)"""
+    """Создаёт платёж YooKassa 39₽ → 1 токен (новичковое 24-часовое окно, до 10 покупок)"""
     await bot.answer_callback_query(callback_query.id)
     user_id = callback_query.from_user.id
 
@@ -4116,7 +4202,7 @@ async def process_pay_29_novice(callback_query: types.CallbackQuery, state: FSMC
     if not is_novice_active_np:
         await bot.send_message(
             user_id,
-            "⏰ *Специальная цена 29₽ закончилась.*\n\n"
+            "⏰ *Специальная цена 39₽ закончилась.*\n\n"
             "Твоё 24-часовое новичковое окно истекло.\n"
             "Теперь доступны стандартные пакеты 👇",
             reply_markup=get_balance_keyboard(user_id),
@@ -4135,23 +4221,38 @@ async def process_pay_29_novice(callback_query: types.CallbackQuery, state: FSMC
         return
 
     remaining_np = 10 - gens_bought_np
-    logging.info(f"🎁 Новичковая генерация 29₽: user={user_id}, куплено={gens_bought_np}, осталось={remaining_np}")
+
+    # Защита от двойного нажатия: если уже есть pending-платёж за последние 10 мин — не создаём новый
+    recent_pending_np = execute_query_sync(
+        "SELECT id FROM payments WHERE user_id = %s AND status = 'pending' "
+        "AND created_at > NOW() - INTERVAL '10 minutes'",
+        (user_id,)
+    )
+    if recent_pending_np:
+        await callback_query.answer(
+            "⏳ Платёж уже создан! Проверьте предыдущее сообщение с кнопкой оплаты.",
+            show_alert=True
+        )
+        logging.info(f"⚠️ pay_29_novice: дубль-нажатие от user={user_id}, блокируем создание нового платежа")
+        return
+
+    logging.info(f"🎁 Новичковая генерация 39₽: user={user_id}, куплено={gens_bought_np}, осталось={remaining_np}")
 
     payment = await create_yookassa_payment(
         user_id,
-        29,
+        39,
         "1 генерация — Подарок новичку ALBI Music",
         {"payment_type": "novice_gen"}
     )
     if payment and payment.get('confirmation', {}).get('confirmation_url'):
         payment_url = payment['confirmation']['confirmation_url']
         payment_id = payment['id']
-        add_payment(user_id, 29, 'pending', payment_id)
+        add_payment(user_id, 39, 'pending', payment_id)
         markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("💳 Оплатить 29₽ — получить 1 генерацию (2 трека)", url=payment_url))
+        markup.add(InlineKeyboardButton("💳 Оплатить 39₽ — получить 1 генерацию (2 трека)", url=payment_url))
         await bot.send_message(
             user_id,
-            f"🎁 *Подарок новичку — 1 генерация за 29₽*\n\n"
+            f"🎁 *Подарок новичку — 1 генерация за 39₽*\n\n"
             f"⏰ Ещё {int(hours_left_np)} ч действует специальная цена.\n"
             f"Осталось: {remaining_np} из 10 новичковых генераций.\n\n"
             "✅ После оплаты баланс пополнится автоматически!\n"

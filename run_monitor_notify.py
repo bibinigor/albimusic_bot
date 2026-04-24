@@ -66,14 +66,16 @@ def mark_user_blocked(user_id: int):
         logger.error(f"❌ Ошибка mark_user_blocked({user_id}): {_e}")
 
 
-async def download_and_cut_audio(url, duration=60):
+async def download_and_cut_audio(url, duration=60, start_offset=0):
     """
-    Скачивает MP3 файл и обрезает до указанной длительности
+    Скачивает MP3 файл и обрезает до указанной длительности.
 
     Args:
         url: URL MP3 файла
         duration: Длительность в секундах (по умолчанию 60)
-    
+        start_offset: Смещение от начала трека в секундах (по умолчанию 0).
+                      Используй ~30 сек чтобы пропустить вступление и попасть в припев.
+
     Returns:
         Путь к обрезанному файлу или None при ошибке
     """
@@ -99,9 +101,12 @@ async def download_and_cut_audio(url, duration=60):
                     logger.error(f"❌ Ошибка скачивания: HTTP {response.status}")
                     return None
         
-        # Обрезаем через ffmpeg
+        # Обрезаем через ffmpeg.
+        # -ss перед -i — быстрый seek к нужной позиции (start_offset сек).
+        # При start_offset=0 поведение идентично старому (обрезка с начала).
         cmd = [
             'ffmpeg',
+            '-ss', str(start_offset),
             '-i', full_path,
             '-t', str(duration),
             '-c', 'copy',
@@ -129,7 +134,7 @@ async def download_and_cut_audio(url, duration=60):
 
 
 async def send_telegram_notification(user_id, task_id, audio_url, is_song=False, is_cover=False):
-    """Отправка ДЕМО аудио файлов (45 сек) с кнопкой разблокировки"""
+    """Отправка ДЕМО аудио файлов (60 сек) с кнопкой разблокировки"""
     try:
         import json
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -342,21 +347,21 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
         is_first_generation = (completed_count == 1)
 
         if is_first_generation:
-            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ДЕМО 45 сек + предложение разблокировки за 29₽")
+            logger.info(f"🎁 Первая генерация user {user_id}: отправляю ДЕМО 60 сек (с ~30 сек, попадаем в припев) + предложение разблокировки за 39₽")
             header = "🎤 Ваша первая песня готова! 🎁" if is_song else "🎵 Ваша первая музыка готова! 🎁"
             await bot.send_message(chat_id=user_id, text=header, parse_mode="Markdown")
 
-            # Отправляем 45-секундное демо (без полного трека)
+            # Отправляем 60-секундное демо начиная с ~30 сек (пропускаем вступление, попадаем в припев)
             demo_paths = []
             for idx, url in enumerate(audio_urls[:2], 1):
                 try:
-                    demo_path = await download_and_cut_audio(url, duration=45)
+                    demo_path = await download_and_cut_audio(url, duration=60, start_offset=30)
                     if demo_path:
                         with open(demo_path, 'rb') as audio_file:
                             await bot.send_audio(
                                 chat_id=user_id,
                                 audio=audio_file,
-                                caption=f"🎼 Демо — Версия {idx} (45 сек)",
+                                caption=f"🎼 Демо — Версия {idx} (60 сек)",
                                 title=f"AI Music Demo v{idx}",
                                 performer="ALBI Music"
                             )
@@ -419,10 +424,10 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
             except Exception as _ref_e:
                 logger.warning(f"⚠️ TG referral bonus error for user {user_id}: {_ref_e}")
 
-            # Кнопки: только «Послушать» и «Разблокировать за 29₽» (первые 24 часа) — без «Скачать» и прочих функций
+            # Кнопки: только «Послушать» и «Разблокировать за 39₽» (первые 24 часа) — без «Скачать» и прочих функций
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
-                    text="🔓 Получить ПОЛНУЮ версию — 29₽ ⏰ (только 24 часа!)",
+                    text="🔓 Получить ПОЛНУЮ версию — 39₽ ⏰ (только 24 часа!)",
                     callback_data=f"pay_unlock_29_{task_id}"
                 )],
                 [InlineKeyboardButton(
@@ -441,20 +446,20 @@ async def send_telegram_notification(user_id, task_id, audio_url, is_song=False,
                 await bot.send_message(
                     chat_id=user_id,
                     text=(
-                        "🎧 *Это демо твоей первой песни (45 секунд)*\n\n"
+                        "🎧 *Это демо твоей первой песни (60 секунд)*\n\n"
                         "⚠️ Это только Preview — полная версия длиннее!\n\n"
-                        "🔓 *Разблокируй полную версию за 29₽:*\n"
+                        "🔓 *Разблокируй полную версию за 39₽:*\n"
                         "• Оба трека без ограничений по времени\n"
                         "• Кнопки «Послушать» и «Скачать»\n"
                         "• Минусовка, Кавер, WAV и многое другое\n\n"
-                        "⏰ *Цена 29₽ действует только 24 часа с момента создания первой песни!*\n"
+                        "⏰ *Цена 39₽ действует только 24 часа с момента создания первой песни!*\n"
                         "После — стандартная цена от 99₽.\n\n"
                         "👇 Нажми кнопку ниже:"
                     ),
                     reply_markup=keyboard,
                     parse_mode="Markdown"
                 )
-                logger.info(f"✅ Кнопка разблокировки (29₽) отправлена user {user_id}")
+                logger.info(f"✅ Кнопка разблокировки (39₽) отправлена user {user_id}")
             except Exception as _send_err:
                 logger.error(f"❌ Ошибка отправки кнопки разблокировки user {user_id}: {_send_err} — помечаем ALREADY_SENT всё равно")
                 if _is_forbidden_error(_send_err):
